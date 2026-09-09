@@ -38,7 +38,7 @@
 - [x] **Step 2: Run `py -3 -m pytest tests/test_config.py -q` and observe the missing-module failure.
 - [x] **Step 3: Add typed frozen dataclasses and validation with the exact constants listed above.
 - [x] **Step 4: Re-run the focused test and then `py -3 -m pytest tests/test_config.py -q`; expect all configuration tests to pass.
-- [ ] **Step 5: Commit `feat: add paper configuration and project scaffold`.
+- [x] **Step 5: Commit `feat: add EqDeepRx reproduction up to uncoded BER`** (combined implementation commit `08bc7ba`).
 
 ### Task 2: Signal generation and conventional receiver math
 
@@ -58,7 +58,7 @@
 - [x] **Step 2: Run both focused files and confirm the expected missing-module failures.
 - [x] **Step 3: Implement deterministic QAM, pilot placement (orthogonal staggered layer pilots), OFDM IFFT/FFT with cyclic prefix, a compact TDL/UMa-like fading channel with optional interference, and the receiver equations.
 - [x] **Step 4: Run focused tests; fix numerical issues until all pass on CPU.
-- [ ] **Step 5: Commit `feat: add paper-aligned OFDM link and equalizers`.
+- [x] **Step 5: Included in combined implementation commit `08bc7ba`.
 
 ### Task 3: EqDeepRx learned modules
 
@@ -78,7 +78,7 @@
 - [x] **Step 2: Run `py -3 -m pytest tests/test_model.py -q` and confirm failure before implementation.
 - [x] **Step 3: Implement preactivation/separable residual blocks, nearest-neighbor 1:8 residual subsampling, pilot-domain time mixing, coordinate maps, shared per-layer processing, and 8-bit demapper output.
 - [x] **Step 4: Run focused model tests and verify no NaN/shape regressions.
-- [ ] **Step 5: Commit `feat: implement EqDeepRx neural architecture`.
+- [x] **Step 5: Included in combined implementation commit `08bc7ba`.
 
 ### Task 4: Paper loss, deterministic training, and evaluation
 
@@ -103,7 +103,7 @@
 - [x] **Step 2: Run focused tests and confirm missing implementation failures.
 - [x] **Step 3: Implement the weighted loss, optional VCL channel-stat regularization, LAMB, deterministic seeded batch generation, atomic checkpointing, short evaluation, and preflight resource estimate.
 - [x] **Step 4: Run focused tests, then a one-step CPU smoke command with tiny dimensions.
-- [ ] **Step 5: Commit `feat: add paper training and uncoded BER evaluation`.
+- [x] **Step 5: Included in combined implementation commit `08bc7ba`.
 
 ### Task 5: Documentation and audits
 
@@ -118,7 +118,7 @@
 - [x] **Step 2: Run the focused documentation test and confirm missing-file failure.
 - [x] **Step 3: Document the paper-to-code mapping, DeepRx inheritance/differences, failed/limited external search evidence, exact smoke commands, expected GPU memory, and the command that starts (but is not run by default) full training.
 - [x] **Step 4: Run documentation tests and manually inspect the rendered Markdown text for contradictions.
-- [ ] **Step 5: Commit `docs: document EqDeepRx audit and preflight workflow`.
+- [x] **Step 5: Included in combined implementation commit `08bc7ba`.
 
 ### Task 6: Full verification and GitHub handoff
 
@@ -130,7 +130,8 @@
 - [x] **Step 2: Run `py -3 scripts/preflight.py --tiny` and `py -3 scripts/train.py --steps 1 --batch-size 2 --tiny`.
 - [x] **Step 3: Run `py -3 scripts/evaluate_uncoded_ber.py --snr-points 0,6 --samples-per-point 2 --tiny` and validate finite JSON/PNG outputs.
 - [x] **Step 4: Re-read the paper audit and requirement checklist; verify no decoder/full-scale training was run and generated artifacts are ignored.
-- [ ] **Step 5: Initialize `eqdeeprx` as its own Git repository, create a clean initial commit, add `https://github.com/Tonyerwite/EqDeepRX.git` as `origin`, and push only after local tests pass. If authentication prevents push, report the exact command/output and leave the repository ready for the user to authenticate.
+- [x] **Step 5a: Initialize `eqdeeprx` as its own Git repository, add the requested `origin`, and create clean commit `08bc7ba` after local tests passed.
+- [ ] **Step 5b: Push to `https://github.com/Tonyerwite/EqDeepRX.git`; currently blocked because terminal HTTPS is reset/times out and the GitHub browser page is signed out (SSH has no public key). The local repository is ready for an authenticated `git push -u origin main`.
 
 ## Self-Review Checklist
 
