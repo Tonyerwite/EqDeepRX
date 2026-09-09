@@ -1,0 +1,57 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from dataclasses import replace
+from pathlib import Path
+
+import torch
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from eqdeeprx.config import paper_config
+from eqdeeprx.model import EqDeepRx
+from eqdeeprx.signal import OFDMSystem
+from eqdeeprx.training import train_steps
+
+
+def tiny_config():
+    config = paper_config().with_modulation("16QAM")
+    return replace(config, n_subcarriers=16, n_fft=24, cyclic_prefix=4, n_rx_antennas=2, n_tx_antennas=2, layer_counts=(2,), model=replace(config.model, detector_channels=8, detector_sections=1, demapper_widths=(4, 4, 4, 4), denoise_widths=(8, 8, 8, 2), denoise_subsamples=(1, 2, 2, 1)))
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(description="Train EqDeepRx up to uncoded BER.")
+    parser.add_argument("--steps", type=int, default=70_000)
+    parser.add_argument("--batch-size", type=int, default=112)
+    parser.add_argument("--n-layers", type=int, default=2, choices=(2, 3, 4))
+    parser.add_argument("--pilot-count", type=int, default=1, choices=(1, 2))
+    parser.add_argument("--snr-db", type=float, default=None)
+    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--output", default="checkpoints/eqdeeprx.pt")
+    parser.add_argument("--tiny", action="store_true", help="Use a CPU-sized 16-subcarrier smoke configuration.")
+    parser.add_argument("--confirm-full-run", action="store_true", help="Required for paper-scale runs over 100 steps.")
+    return parser
+
+
+def main():
+    args = build_arg_parser().parse_args()
+    if not args.tiny and args.steps > 100 and not args.confirm_full_run:
+        raise SystemExit("Refusing a paper-scale run without --confirm-full-run; run scripts/preflight.py first.")
+    config = tiny_config() if args.tiny else paper_config()
+    if args.tiny:
+        args.steps = min(args.steps, 1)
+        args.batch_size = min(args.batch_size, 2)
+    model = EqDeepRx(config)
+    result = train_steps(model, OFDMSystem(config, device=args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu"), config, steps=args.steps, batch_size=args.batch_size, n_layers=args.n_layers if not args.tiny else 2, pilot_count=args.pilot_count, snr_db=args.snr_db, seed=args.seed, output_path=Path(args.output), device=args.device)
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+
