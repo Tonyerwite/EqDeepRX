@@ -6,6 +6,33 @@ import torch
 import torch.nn.functional as F
 
 
+def vcl_regularization(
+    activations: torch.Tensor,
+    *,
+    alpha: float = 1e-5,
+    channel_dim: int = 1,
+    target_mean: float = 0.0,
+    target_variance: float = 1.0,
+) -> torch.Tensor:
+    """Compute the paper's per-channel mean/variance VCL regularizer."""
+
+    if activations.ndim < 2:
+        raise ValueError("activations must have a batch and channel dimension")
+    if channel_dim < 0:
+        channel_dim += activations.ndim
+    if not 0 <= channel_dim < activations.ndim:
+        raise ValueError("channel_dim is outside the activation tensor")
+    if activations.numel() == 0:
+        return activations.new_zeros(())
+    values = activations.movedim(channel_dim, 1)
+    reduce_dims = (0,) + tuple(range(2, values.ndim))
+    means = values.mean(dim=reduce_dims)
+    variances = values.var(dim=reduce_dims, unbiased=False)
+    mean_penalty = (means - float(target_mean)).square().mean()
+    variance_penalty = (variances - float(target_variance)).square().mean()
+    return float(alpha) * mean_penalty + variance_penalty
+
+
 def _mask_for_logits(mask: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
     mask = mask.to(device=logits.device, dtype=logits.dtype)
     if logits.dim() == 5:

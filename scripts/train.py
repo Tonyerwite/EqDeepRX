@@ -21,15 +21,15 @@ from eqdeeprx.training import train_steps
 
 def tiny_config():
     config = paper_config().with_modulation("16QAM")
-    return replace(config, n_subcarriers=16, n_fft=24, cyclic_prefix=4, n_rx_antennas=2, n_tx_antennas=2, layer_counts=(2,), model=replace(config.model, detector_channels=8, detector_sections=1, demapper_widths=(4, 4, 4, 4), denoise_widths=(8, 8, 8, 2), denoise_subsamples=(1, 2, 2, 1)))
+    return replace(config, n_subcarriers=16, n_fft=24, cyclic_prefix=4, n_rx_antennas=2, n_tx_antennas=2, layer_counts=(2,), training=replace(config.training, layer_counts=(2,), interference_probability=0.0), model=replace(config.model, detector_channels=8, detector_sections=1, demapper_widths=(4, 4, 4, 4), denoise_widths=(8, 8, 8, 2), denoise_subsamples=(1, 2, 2, 1)))
 
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Train EqDeepRx up to uncoded BER.")
     parser.add_argument("--steps", type=int, default=70_000)
     parser.add_argument("--batch-size", type=int, default=112)
-    parser.add_argument("--n-layers", type=int, default=2, choices=(2, 3, 4))
-    parser.add_argument("--pilot-count", type=int, default=1, choices=(1, 2))
+    parser.add_argument("--n-layers", type=int, default=None, choices=(2, 3, 4))
+    parser.add_argument("--pilot-count", type=int, default=None, choices=(1, 2))
     parser.add_argument("--snr-db", type=float, default=None)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -54,4 +54,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

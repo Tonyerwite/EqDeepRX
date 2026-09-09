@@ -14,9 +14,12 @@ The local paper PDF was read page by page. The implementation follows these equa
 | DetectorNN | `model.py:DetectorNN` | Four sections, shared across layers, 6 real input channels (two equalizers plus two coordinate maps), 1:8 residual path |
 | DemapperNN | `model.py:DemapperNN` | Four 1x1 residual blocks, `[32,32,32,8]`, shared across layers |
 | Training loss, Eq. (13) | `losses.py:eqdeeprx_loss` | Positive-logit bit-one BCE, `log2(1+SNR)` weighting, `lambda=1e-5` symbol loss |
+| VCL stability regularization | `losses.py:vcl_regularization` and `training.py:train_steps` | Per-channel batch/spatial mean target 0 and variance target 1; `alpha=1e-5` mean term, applied to every DetectorNN section state |
 | Paper uncoded BER endpoint | `evaluation.py` and `scripts/evaluate_uncoded_ber.py` | Stops before decoder, as requested |
 
 The default system is the paper's 30 kHz/192-subcarrier/16-RX/2-4-layer setup, not the supplied DeepRx reproduction's 15 kHz/312-subcarrier/2-RX/1-layer setup. A tiny configuration exists only for tests and smoke runs.
+
+The paper-scale training loop samples 2, 3, or 4 MIMO layers, one or two DMRS symbols, and an interference-present batch with probability 0.5. Explicit `n_layers`, `pilot_count`, and SNR arguments remain available for deterministic smoke tests.
 
 The full default model count measured locally is **118,740** trainable parameters, excluding the deterministic equalizers.
 

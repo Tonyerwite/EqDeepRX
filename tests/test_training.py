@@ -4,6 +4,7 @@ import torch
 
 from eqdeeprx.config import paper_config
 from eqdeeprx.losses import eqdeeprx_loss
+from eqdeeprx.losses import vcl_regularization
 from eqdeeprx.signal import OFDMSystem
 from eqdeeprx.training import Lamb, paper_learning_rate, train_steps
 from eqdeeprx.model import EqDeepRx
@@ -36,6 +37,12 @@ def test_loss_uses_positive_logits_and_snr_weighted_symbol_term():
 
     assert low.item() < high.item()
     assert inverted.item() > low.item()
+
+
+def test_vcl_regularization_penalizes_nonzero_mean_and_nonunit_variance():
+    activations = torch.ones(2, 3, 4, 4)
+    assert vcl_regularization(activations).item() > 0.0
+    assert vcl_regularization(torch.randn(2, 3, 4, 4)).item() >= 0.0
 
 
 def test_paper_lamb_and_linear_schedule_contract():

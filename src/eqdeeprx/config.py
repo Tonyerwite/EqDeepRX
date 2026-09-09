@@ -33,6 +33,9 @@ class TrainingConfig:
     lamb_beta2: float = 0.999
     lamb_eps: float = 1e-6
     symbol_loss_weight: float = 1e-5
+    layer_counts: Tuple[int, ...] = (2, 3, 4)
+    interference_probability: float = 0.5
+    vcl_alpha: float = 1e-5
     seed: int = 2026
 
 
@@ -97,4 +100,3 @@ def paper_config() -> EqDeepRxConfig:
     """Return a fresh immutable configuration matching the paper defaults."""
 
     return EqDeepRxConfig()
-

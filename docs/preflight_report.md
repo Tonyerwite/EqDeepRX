@@ -4,7 +4,7 @@ The following checks were run before any paper-scale training:
 
 ```text
 py -3 -m pytest -q
-17 passed in 4.73s
+18 passed in 3.92s
 
 py -3 scripts/preflight.py --device cpu
 {
@@ -31,3 +31,5 @@ five finite curves written to outputs/smoke_eval/uncoded_ber_metrics.json
 ```
 
 No cache, 70k-step job, LDPC decoder, or external publication action was started. The full-scale command is guarded by `--confirm-full-run` and remains a user decision.
+
+The training implementation also includes the paper's simplified VCL channel-statistic regularization and defaults to sampling 2-4 layers, one or two DMRS symbols, and interference with probability 0.5. The tiny smoke configuration disables random interference and fixes the layer count at two so the check remains deterministic.

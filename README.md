@@ -11,6 +11,7 @@ The deliverable intentionally stops before LDPC decoding. It reports hard decisi
 - Shared-weight per-layer DetectorNN with coordinate maps and full/1:8 residual paths.
 - Shared per-layer DemapperNN with eight output logits; active modulation bits are masked.
 - Direct uncoded QAM targets, equation (13) weighted BCE plus symbol loss, LAMB, and linear learning-rate decay.
+- Paper training distribution: random 2/3/4-layer batches, one or two DMRS symbols, 0.5 probability of an interference-present batch, and simplified VCL channel-statistic regularization.
 - Deterministic tiny smoke generation and a five-curve uncoded-BER evaluator.
 
 ## Paper defaults

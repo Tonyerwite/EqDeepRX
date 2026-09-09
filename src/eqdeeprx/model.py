@@ -48,13 +48,17 @@ class DetectorNN(nn.Module):
             )
         self.max_bits = max_bits
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+    def forward(self, x: torch.Tensor, *, return_full_states: bool = False):
         out = self.project(x)
         states: List[torch.Tensor] = []
+        full_states: List[torch.Tensor] = []
         for blocks in self.section_blocks:
             updated = blocks[1](blocks[0](out))
             out = out + updated
             states.append(out[:, :2])
+            full_states.append(out)
+        if return_full_states:
+            return out, states, full_states
         return out, states
 
 
@@ -115,21 +119,33 @@ class EqDeepRx(nn.Module):
         n, layers, f, s = lmmse.shape
         logits_per_layer = []
         all_states: List[torch.Tensor] = []
+        all_detector_states: List[torch.Tensor] = []
         coordinates = self._coordinates(n, f, s, received.device, received.real.dtype)
         for layer in range(layers):
             detector_input = torch.cat((lmmse[:, layer].real.unsqueeze(1), lmmse[:, layer].imag.unsqueeze(1), rzf[:, layer].real.unsqueeze(1), rzf[:, layer].imag.unsqueeze(1), coordinates), dim=1)
-            detector_features, states = self.detector(detector_input)
+            detector_features, states, full_states = self.detector(detector_input, return_full_states=True)
             logits_per_layer.append(self.demapper(detector_features))
             if not all_states:
                 all_states = [state.unsqueeze(1) for state in states]
             else:
                 all_states = [torch.cat((old, state.unsqueeze(1)), dim=1) for old, state in zip(all_states, states)]
+            if not all_detector_states:
+                all_detector_states = [state.unsqueeze(1) for state in full_states]
+            else:
+                all_detector_states = [torch.cat((old, state.unsqueeze(1)), dim=1) for old, state in zip(all_detector_states, full_states)]
         logits = torch.stack(logits_per_layer, dim=1)
         if layers == 1:
             logits = logits[:, 0]
         if not return_aux:
             return logits
-        return logits, {"lmmse": lmmse, "rzf": rzf, "channel": channel, "covariance": covariance, "symbol_states": all_states}
+        return logits, {
+            "lmmse": lmmse,
+            "rzf": rzf,
+            "channel": channel,
+            "covariance": covariance,
+            "symbol_states": all_states,
+            "detector_states": all_detector_states,
+        }
 
     def count_parameters(self) -> int:
         return sum(parameter.numel() for parameter in self.parameters() if parameter.requires_grad)

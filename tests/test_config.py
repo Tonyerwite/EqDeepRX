@@ -29,6 +29,8 @@ def test_paper_config_freezes_paper_network_and_training_defaults():
     assert config.training.learning_rate == pytest.approx(4.4e-3)
     assert config.training.total_steps == 70_000
     assert config.training.symbol_loss_weight == pytest.approx(1e-5)
+    assert config.training.layer_counts == (2, 3, 4)
+    assert config.training.interference_probability == pytest.approx(0.5)
 
 
 def test_paper_config_rejects_unsupported_layer_count_and_modulation():
@@ -38,4 +40,3 @@ def test_paper_config_rejects_unsupported_layer_count_and_modulation():
         config.validate_layer_count(5)
     with pytest.raises(ValueError, match="modulation"):
         config.with_modulation("QPSK")
-

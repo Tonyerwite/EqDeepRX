@@ -9,7 +9,7 @@ from typing import Dict
 import torch
 
 from .config import EqDeepRxConfig
-from .losses import eqdeeprx_loss
+from .losses import eqdeeprx_loss, vcl_regularization
 from .signal import OFDMSystem, bits_per_symbol
 
 
@@ -115,7 +115,7 @@ def train_steps(
     steps: int,
     batch_size: int | None = None,
     n_layers: int | None = None,
-    pilot_count: int = 1,
+    pilot_count: int | None = None,
     snr_db: float | None = None,
     seed: int | None = None,
     output_path: Path | None = None,
@@ -126,10 +126,10 @@ def train_steps(
     device = torch.device(device)
     model.to(device)
     batch_size = batch_size or config.training.batch_size
-    n_layers = n_layers or config.layer_counts[0]
-    config.validate_layer_count(n_layers)
     seed = config.training.seed if seed is None else int(seed)
     random_state = random.Random(seed)
+    if n_layers is not None:
+        config.validate_layer_count(n_layers)
     optimizer = Lamb(
         model.parameters(),
         lr=config.training.learning_rate,
@@ -140,8 +140,12 @@ def train_steps(
     history = {"steps": 0, "losses": [], "bers": [], "learning_rates": []}
     bit_mask = _bit_mask(config, device)
     for step in range(steps):
+        current_layers = n_layers if n_layers is not None else random_state.choice(config.training.layer_counts)
+        config.validate_layer_count(current_layers)
+        current_pilot_count = pilot_count if pilot_count is not None else random_state.choice((1, 2))
         current_snr = float(snr_db) if snr_db is not None else random_state.uniform(*config.snr_db_range)
-        batch = system.generate_batch(batch_size=batch_size, n_layers=n_layers, pilot_count=pilot_count, snr_db=current_snr, seed=seed + step)
+        add_interference = random_state.random() < config.training.interference_probability
+        batch = system.generate_batch(batch_size=batch_size, n_layers=current_layers, pilot_count=current_pilot_count, snr_db=current_snr, seed=seed + step, add_interference=add_interference)
         received = batch.received.to(device)
         pilots = batch.pilot_symbols.to(device)
         pilot_mask = batch.pilot_mask.to(device)
@@ -159,6 +163,12 @@ def train_steps(
             snr_linear=10.0 ** (current_snr / 10.0),
             lambda_symbol=config.training.symbol_loss_weight,
         )
+        vcl_loss = loss.new_zeros(())
+        for state in aux.get("detector_states", ()):
+            # Detector states are [batch, layer, channel, frequency, symbol].
+            batch_channel = state.reshape(-1, state.shape[2], state.shape[3], state.shape[4])
+            vcl_loss = vcl_loss + vcl_regularization(batch_channel, alpha=config.training.vcl_alpha)
+        loss = loss + vcl_loss
         loss.backward()
         lr = paper_learning_rate(step, total_steps=config.training.total_steps, base_lr=config.training.learning_rate, warmup_steps=config.training.warmup_steps)
         for group in optimizer.param_groups:
