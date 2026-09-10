@@ -1,41 +1,41 @@
-# EqDeepRx Paper and DeepRx Audit
+# Paper Alignment Audit
 
-## Paper facts used by the implementation
+The final implementation was checked against the v2 LaTeX source of *EqDeepRx: Learning a Scalable and Interference Mitigating MIMO Receiver* and the supplied DeepRx paper/code. Scope is the primary EqDeepRx 64-QAM path through uncoded BER; decoder-dependent and ablation experiments are excluded.
 
-The local paper PDF was read page by page. The implementation follows these equations and architecture statements:
+## Published Equations and Flow
 
-| Paper item | Code location | Audit result |
+| Paper requirement | Implementation | Result |
 |---|---|---|
-| Raw rank-one DMRS estimate, Eq. (8) | `src/eqdeeprx/receiver.py:estimate_raw_channel` | `y x* / ||x||^2` at pilot REs |
-| RZF, Eq. (2)-(3) | `receiver.py:rzf_equalize` | `alpha=1e-4`, unit-gain diagonal scaling |
-| INCM and shrinkage, Eq. (5),(9) | `receiver.py:estimate_incm` | 24-subcarrier bands, Hermitian PSD shrinkage |
-| LMMSE, Eq. (6)-(7) | `receiver.py:lmmse_equalize` | Uses the estimated INCM and unit-gain scaling |
-| DenoiseNN | `model.py:DenoiseNN` | Per RX/TX pair, frequency-only separable residual blocks, `[64,64,64,2]`, subsampling `[1,4,2,1]` |
-| DetectorNN | `model.py:DetectorNN` | Four sections, shared across layers, 6 real input channels (two equalizers plus two coordinate maps), 1:8 residual path |
-| DemapperNN | `model.py:DemapperNN` | Four 1x1 residual blocks, `[32,32,32,8]`, shared across layers |
-| Training loss, Eq. (13) | `losses.py:eqdeeprx_loss` | Positive-logit bit-one BCE, `log2(1+SNR)` weighting, `lambda=1e-5` symbol loss |
-| VCL stability regularization | `losses.py:vcl_regularization` and `training.py:train_steps` | Per-channel batch/spatial mean target 0 and variance target 1; `alpha=1e-5` mean term, applied to every DetectorNN section state |
-| Paper uncoded BER endpoint | `evaluation.py` and `scripts/evaluate_uncoded_ber.py` | Stops before decoder, as requested |
+| Eq. (2)-(3): RZF `(H^H H + alpha I)^-1 H^H`, `alpha=1e-4`, inverse diagonal unit-gain scaling | `receiver.py:rzf_equalize` | Matched |
+| Eq. (5)-(7): `R=E[dd^H]`, LMMSE with `R`, inverse diagonal unit-gain scaling | `receiver.py:estimate_incm`, `lmmse_equalize` | Matched |
+| Eq. (8): rank-one `y x^H / ||x||^2` at orthogonal DMRS REs | `receiver.py:estimate_raw_channel` | Matched |
+| Eq. (9): SCM per 24 subcarriers and complex-Gaussian OAS shrinkage toward `tr(S)/N_R I` | `receiver.py:oas_complex_shrinkage`, `estimate_incm` | Matched |
+| Eq. (10): LLR `log P(bit=0)/P(bit=1)` | demappers, BCE, BER decisions | Matched; positive means bit zero |
+| Eqs. (11)-(12): nearest 1:N down/up sampling, full-resolution residual, asymmetric depthwise-separable convolutions | `layers.py:SubsampledResidualBlock` | Matched |
+| Training loss: SNR weight, BCE, squared symbol norm from every Detector section, `lambda=1e-5` | `losses.py:eqdeeprx_loss` | Matched |
+| mVCL: per-channel batch/spatial mean 0 and variance 1, divide by channel count, `alpha=1e-5` | `losses.py`, exact accumulated-batch statistics in `training.py` | Matched |
 
-The default system is the paper's 30 kHz/192-subcarrier/16-RX/2-4-layer setup, not the supplied DeepRx reproduction's 15 kHz/312-subcarrier/2-RX/1-layer setup. A tiny configuration exists only for tests and smoke runs.
+The standard data path is full time-domain Sionna 2.1: online UMa training; independent desired/interfering TR 38.901 channels; OFDM, CP, random interferer timing, AWGN, and resulting ISI/ICI; receiver processing and uncoded hard-bit BER then operate on the demodulated full slot.
 
-The paper-scale training loop samples 2, 3, or 4 MIMO layers, one or two DMRS symbols, and an interference-present batch with probability 0.5. Explicit `n_layers`, `pilot_count`, and SNR arguments remain available for deterministic smoke tests.
+## Published Architecture and Parameters
 
-The full default model count measured locally is **118,740** trainable parameters, excluding the deterministic equalizers.
+- DenoiseNN: independent RX/TX pilot pair, real/imag inputs, four frequency-only residual blocks, widths `[64,64,64,2]`, subsampling `[1,4,2,1]`, and pointwise time mixing after each block.
+- DetectorNN: six real inputs (LMMSE, RZF, frequency map, time map), `1x1` projection to 64, four shared-weight sections, each with full and 1:8 residual blocks.
+- DemapperNN: four shared per-layer pointwise residual blocks, widths `[32,32,32,8]`; lower modulation orders mask unused outputs.
+- System: 30 kHz SCS, 192 subcarriers, 14 symbols, 16 RX antennas, 2-4 one-antenna UE layers, UMa training, and UMa/CDL-C/CDL-D/UMi validation.
+- Distribution: SNR uniform 0-45 dB, speed uniform 0-35 m/s, lognormal INR `(10 dB, 5 dB)`, zero/one interfering UE, orthogonal staggered DMRS on every fourth subcarrier, one/two DMRS symbols.
+- Training: effective batch 112, LAMB, initial LR `4.4e-3`, linear decay to zero, about 70k iterations/about 8M samples, 64-QAM primary model.
+- Scale invariance: one training job samples 2/3/4 layers and both DMRS patterns; the same DetectorNN/DemapperNN modules are called per layer with shared parameters. No layer-specific network or checkpoint is created.
+- Primary learned parameter count: **115,456**, which rounds to the paper's 116k value (equalizers excluded).
 
-## Inheritance relationship with DeepRx
+## DeepRx Reuse
 
-EqDeepRx is an extension of the earlier DeepRx idea, not a drop-in replacement for the DeepRx CNN:
+The supplied DeepRx work established the full-slot tensor convention, DMRS-to-channel-estimate boundary, direct bit-supervised training, and uncoded-BER endpoint. EqDeepRx is not the monolithic DeepRx CNN: it replaces that learned path with DenoiseNN, two conventional equalizers, shared per-layer DetectorNN, and DemapperNN as required by the newer paper. The supplied DeepRx tree was left unchanged.
 
-1. Both start from a full OFDM resource grid and DMRS-derived channel information, retain conventional communication-system operations, and train directly against transmitted bits using positive-logit bit convention.
-2. DeepRx's original path feeds received signal, pilots, and raw LS features into one monolithic fully convolutional ResNet that emits all LLRs together.
-3. EqDeepRx keeps raw DMRS estimation/interpolation but inserts learned pilot-domain denoising, then runs two conventional equalizers (RZF and INCM-aware LMMSE) in parallel. The learned detector and demapper are applied with shared weights independently to each MIMO layer.
-4. This decomposition is the source of EqDeepRx's near-linear layer scaling and layer-count generalization. The implementation therefore preserves a layer dimension in logits for multi-layer runs; a one-layer call is squeezed to the familiar `[N,B,F,S]` DeepRx shape.
+## Figure 6(a)
 
-The supplied DeepRx repository remains unchanged. Its MATLAB path is standards-grade and its Python reference confirms the tensor layout and uncoded BER boundary, but its published 30k-step checkpoint cannot be used as an EqDeepRx checkpoint because the architectures and inputs differ.
+`evaluation.py:evaluate_paper_figure6a` requires the Sionna backend and a trained checkpoint, uses CDL-C at 10-15 m/s with one interferer, samples requested SNR and bins errors by realized SINR, and uses 32,000 validation slots total across the two DMRS cases. It produces uncoded BER before LDPC; DenoiseNN-only and decoder-dependent curves are not implemented.
 
-## Scope and limitations
+## Necessary Reproduction Choices
 
-- This delivery implements the uncoded BER stage only. LDPC encoding/decoding, BLER, MCS-table rate matching, and spectral-efficiency curves are deliberately outside the requested handoff.
-- The local Python link uses an OFDM-equivalent CP-sufficient multipath channel for fast deterministic smoke/evaluation runs. A standards-grade MATLAB/Sionna channel can be connected at the `SignalBatch` boundary without changing the model or receiver APIs.
-- The paper's original online 8M-sample dataset seed and exact frame order are not public; this project fixes seed 2026 and records every smoke/evaluation seed.
+The public paper does not specify the original FFT/CP values, TimeMixer subset `C_s`, LAMB beta/epsilon/weight decay, random seed/frame order, exact SINR bin edges, or which internal layers receive mVCL. This implementation fixes these at 256/18, 2, `(0.9,0.999)/1e-6/0`, 2026, one-dB bins, and all four Detector section states. These choices are configuration-tested and preflight-tested, but cannot be asserted to match unavailable author-private code bit for bit.

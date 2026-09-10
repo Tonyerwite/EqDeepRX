@@ -1,9 +1,85 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 import torch
 import torch.nn.functional as F
+
+
+@dataclass(frozen=True)
+class ActivationStatistics:
+    mean: torch.Tensor
+    variance: torch.Tensor
+    count: int
+
+
+def activation_statistics(
+    activations: Iterable[torch.Tensor], *, channel_dim: int = 1
+) -> ActivationStatistics:
+    """Aggregate per-channel population moments without retaining graphs."""
+
+    total = None
+    total_squares = None
+    count = 0
+    for activation in activations:
+        values = activation.movedim(channel_dim, 1)
+        reduce_dims = (0,) + tuple(range(2, values.ndim))
+        local_total = values.sum(dim=reduce_dims)
+        local_squares = values.square().sum(dim=reduce_dims)
+        local_count = values.numel() // values.shape[1]
+        total = local_total if total is None else total + local_total
+        total_squares = (
+            local_squares
+            if total_squares is None
+            else total_squares + local_squares
+        )
+        count += local_count
+    if total is None or total_squares is None or count == 0:
+        raise ValueError("activations must contain at least one value")
+    mean = total / float(count)
+    variance = total_squares / float(count) - mean.square()
+    return ActivationStatistics(mean.detach(), variance.clamp_min(0.0).detach(), count)
+
+
+def vcl_regularization_from_statistics(
+    activations: torch.Tensor,
+    statistics: ActivationStatistics,
+    *,
+    alpha: float = 1e-5,
+    channel_dim: int = 1,
+    target_mean: float = 0.0,
+    target_variance: float = 1.0,
+) -> torch.Tensor:
+    """Exact full-batch VCL value/gradient contribution for one microbatch."""
+
+    values = activations.movedim(channel_dim, 1)
+    reduce_dims = (0,) + tuple(range(2, values.ndim))
+    local_sum = values.sum(dim=reduce_dims)
+    local_sum_squares = values.square().sum(dim=reduce_dims)
+    local_count = values.numel() // values.shape[1]
+    mean = statistics.mean.to(values)
+    variance = statistics.variance.to(values)
+    channels = values.shape[1]
+    scale = float(alpha) / float(channels)
+    exact = scale * (
+        (mean - float(target_mean)).square().sum()
+        + (variance - float(target_variance)).square().sum()
+    )
+    surrogate = scale * (
+        2.0
+        * (mean - float(target_mean))
+        * local_sum
+        / float(statistics.count)
+        + 2.0
+        * (variance - float(target_variance))
+        * (
+            local_sum_squares / float(statistics.count)
+            - 2.0 * mean * local_sum / float(statistics.count)
+        )
+    ).sum()
+    value_share = exact * (float(local_count) / float(statistics.count))
+    return value_share + surrogate - surrogate.detach()
 
 
 def vcl_regularization(
@@ -28,9 +104,10 @@ def vcl_regularization(
     reduce_dims = (0,) + tuple(range(2, values.ndim))
     means = values.mean(dim=reduce_dims)
     variances = values.var(dim=reduce_dims, unbiased=False)
-    mean_penalty = (means - float(target_mean)).square().mean()
-    variance_penalty = (variances - float(target_variance)).square().mean()
-    return float(alpha) * mean_penalty + variance_penalty
+    mean_penalty = (means - float(target_mean)).square().sum()
+    variance_penalty = (variances - float(target_variance)).square().sum()
+    channels = values.shape[1]
+    return float(alpha) * (mean_penalty + variance_penalty) / float(channels)
 
 
 def _mask_for_logits(mask: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
@@ -67,7 +144,7 @@ def _bits_for_logits(bit_mask: torch.Tensor, logits: torch.Tensor) -> torch.Tens
 
 def masked_bce(logits: torch.Tensor, target_bits: torch.Tensor, data_mask: torch.Tensor, bit_mask: torch.Tensor) -> torch.Tensor:
     full_mask = (_mask_for_logits(data_mask, logits) * _bits_for_logits(bit_mask, logits)).expand_as(logits)
-    bce = F.binary_cross_entropy_with_logits(logits, target_bits.to(logits.device).to(logits.dtype), reduction="none")
+    bce = F.binary_cross_entropy_with_logits(-logits, target_bits.to(logits.device).to(logits.dtype), reduction="none")
     return (bce * full_mask).sum() / full_mask.sum().clamp_min(1.0)
 
 
@@ -82,7 +159,7 @@ def eqdeeprx_loss(
     snr_linear: torch.Tensor | float = 1.0,
     lambda_symbol: float = 1e-5,
 ) -> torch.Tensor:
-    """Equation (13), with positive logits denoting bit one."""
+    """Equation (13), with Eq. (10) LLRs positive for bit zero."""
 
     if logits.shape[-3] != target_bits.shape[-3]:
         active_bits = min(logits.shape[-3], target_bits.shape[-3])
@@ -92,7 +169,7 @@ def eqdeeprx_loss(
     mask = _mask_for_logits(data_mask, logits)
     bits = _bits_for_logits(bit_mask, logits)
     full_mask = (mask * bits).expand_as(logits)
-    per_element = F.binary_cross_entropy_with_logits(logits, target_bits.to(logits.device).to(logits.dtype), reduction="none")
+    per_element = F.binary_cross_entropy_with_logits(-logits, target_bits.to(logits.device).to(logits.dtype), reduction="none")
     per_sample = (per_element * full_mask).reshape(logits.shape[0], -1).sum(dim=1) / full_mask.reshape(logits.shape[0], -1).sum(dim=1).clamp_min(1.0)
 
     symbol_loss = logits.new_zeros(logits.shape[0])
@@ -108,8 +185,11 @@ def eqdeeprx_loss(
             if state.dim() != 5:
                 raise ValueError("symbol states must be [N,L,2,F,S]")
             prediction = torch.complex(state[:, :, 0], state[:, :, 1])
-            error = (prediction - target).abs().square() * symbol_mask
-            symbol_loss = symbol_loss + error.reshape(error.shape[0], -1).sum(dim=1) / symbol_mask.reshape(symbol_mask.shape[0], -1).sum(dim=1).clamp_min(1.0)
+            error = (prediction - target).abs().square()
+            expanded_mask = symbol_mask.expand_as(error)
+            symbol_loss = symbol_loss + (error * expanded_mask).reshape(
+                error.shape[0], -1
+            ).sum(dim=1)
 
     weight = torch.as_tensor(snr_linear, device=logits.device, dtype=logits.dtype)
     if weight.dim() == 0:

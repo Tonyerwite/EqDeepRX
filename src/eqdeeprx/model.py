@@ -27,7 +27,7 @@ class DenoiseNN(nn.Module):
         out = x
         for block, mixer in zip(self.blocks, self.mixers):
             out = mixer(block(out))
-        return out
+        return out.float()
 
 
 class DetectorNN(nn.Module):
@@ -55,8 +55,9 @@ class DetectorNN(nn.Module):
         for blocks in self.section_blocks:
             updated = blocks[1](blocks[0](out))
             out = out + updated
-            states.append(out[:, :2])
-            full_states.append(out)
+            states.append(out[:, :2].float())
+            full_states.append(out.float())
+        out = out.float()
         if return_full_states:
             return out, states, full_states
         return out, states
@@ -76,7 +77,7 @@ class DemapperNN(nn.Module):
         out = x
         for block in self.blocks:
             out = block(out)
-        return out
+        return out.float()
 
 
 class EqDeepRx(nn.Module):
@@ -98,10 +99,45 @@ class EqDeepRx(nn.Module):
 
     def _denoise_channel(self, raw: torch.Tensor, pilot_mask: torch.Tensor) -> torch.Tensor:
         n, nr, nt, f, s = raw.shape
-        features = torch.stack((raw.real, raw.imag), dim=2).reshape(n * nr * nt, 2, f, s)
-        denoised = self.denoise(features).reshape(n, nr, nt, 2, f, s)
-        complex_estimate = torch.complex(denoised[:, :, :, 0], denoised[:, :, :, 1])
-        return complex_estimate * pilot_mask[:, None]
+        mask = pilot_mask > 0
+        frequency_locations = torch.nonzero(mask.any(dim=-1), as_tuple=False)
+        time_locations = torch.nonzero(mask.any(dim=-2), as_tuple=False)
+        pair_count = n * nt
+        if (
+            frequency_locations.shape[0] == 0
+            or frequency_locations.shape[0] % pair_count
+            or time_locations.shape[0] % pair_count
+        ):
+            raise ValueError("each batch/layer pair must have a uniform pilot grid")
+        n_pilot_frequencies = frequency_locations.shape[0] // pair_count
+        n_pilot_symbols = time_locations.shape[0] // pair_count
+        frequencies = frequency_locations[:, 2].reshape(
+            n, nt, n_pilot_frequencies
+        )
+        symbols = time_locations[:, 2].reshape(n, nt, n_pilot_symbols)
+
+        by_pair = raw.permute(0, 2, 1, 3, 4)
+        frequency_indices = frequencies[:, :, None, :, None].expand(
+            n, nt, nr, n_pilot_frequencies, s
+        )
+        compact = torch.gather(by_pair, 3, frequency_indices)
+        time_indices = symbols[:, :, None, None, :].expand(
+            n, nt, nr, n_pilot_frequencies, n_pilot_symbols
+        )
+        compact = torch.gather(compact, 4, time_indices)
+        denoiser_input = torch.stack((compact.real, compact.imag), dim=3).reshape(
+            n * nt * nr, 2, n_pilot_frequencies, n_pilot_symbols
+        )
+        denoised = self.denoise(denoiser_input).reshape(
+            n, nt, nr, 2, n_pilot_frequencies, n_pilot_symbols
+        )
+        estimate = torch.complex(denoised[:, :, :, 0], denoised[:, :, :, 1])
+        flat_indices = (
+            frequencies[..., :, None] * s + symbols[..., None, :]
+        ).reshape(n, nt, 1, -1).expand(n, nt, nr, -1)
+        full = raw.new_zeros(n, nt, nr, f * s)
+        full.scatter_(3, flat_indices, estimate.reshape(n, nt, nr, -1))
+        return full.reshape(n, nt, nr, f, s).permute(0, 2, 1, 3, 4)
 
     @staticmethod
     def _coordinates(batch: int, f: int, s: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -117,23 +153,27 @@ class EqDeepRx(nn.Module):
         lmmse = lmmse_equalize(received, channel, covariance, coherence_bandwidth=self.config.receiver.incm_coherence_bandwidth)
         rzf = rzf_equalize(received, channel, alpha=self.config.receiver.rzf_alpha)
         n, layers, f, s = lmmse.shape
-        logits_per_layer = []
-        all_states: List[torch.Tensor] = []
-        all_detector_states: List[torch.Tensor] = []
         coordinates = self._coordinates(n, f, s, received.device, received.real.dtype)
-        for layer in range(layers):
-            detector_input = torch.cat((lmmse[:, layer].real.unsqueeze(1), lmmse[:, layer].imag.unsqueeze(1), rzf[:, layer].real.unsqueeze(1), rzf[:, layer].imag.unsqueeze(1), coordinates), dim=1)
-            detector_features, states, full_states = self.detector(detector_input, return_full_states=True)
-            logits_per_layer.append(self.demapper(detector_features))
-            if not all_states:
-                all_states = [state.unsqueeze(1) for state in states]
-            else:
-                all_states = [torch.cat((old, state.unsqueeze(1)), dim=1) for old, state in zip(all_states, states)]
-            if not all_detector_states:
-                all_detector_states = [state.unsqueeze(1) for state in full_states]
-            else:
-                all_detector_states = [torch.cat((old, state.unsqueeze(1)), dim=1) for old, state in zip(all_detector_states, full_states)]
-        logits = torch.stack(logits_per_layer, dim=1)
+        detector_input = torch.cat(
+            (
+                lmmse.real.unsqueeze(2),
+                lmmse.imag.unsqueeze(2),
+                rzf.real.unsqueeze(2),
+                rzf.imag.unsqueeze(2),
+                coordinates.unsqueeze(1).expand(-1, layers, -1, -1, -1),
+            ),
+            dim=2,
+        ).reshape(n * layers, 6, f, s)
+        detector_features, states, full_states = self.detector(
+            detector_input, return_full_states=True
+        )
+        demapped = self.demapper(detector_features)
+        logits = demapped.reshape(n, layers, demapped.shape[1], f, s)
+        all_states = [state.reshape(n, layers, 2, f, s) for state in states]
+        all_detector_states = [
+            state.reshape(n, layers, self.model_config.detector_channels, f, s)
+            for state in full_states
+        ]
         if layers == 1:
             logits = logits[:, 0]
         if not return_aux:

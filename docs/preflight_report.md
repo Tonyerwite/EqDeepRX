@@ -1,35 +1,33 @@
-# Preflight Report
+# Final Preflight Report
 
-The following checks were run before any paper-scale training:
+The formal CUDA preflight was run with the delivered Sionna/PyTorch environment and did not start the 70,000-step job.
 
-```text
-py -3 -m pytest -q
-18 passed in 3.92s
-
-py -3 scripts/preflight.py --device cpu
-{
-  "torch": "2.8.0+cu128",
-  "cuda_available": true,
-  "device": "cpu",
-  "paper_steps": 70000,
-  "model_parameters": 118740,
-  "estimated_received_input_mib": 36.75,
-  "full_training_started": false
-}
-
-Default forward check: `[1, 2, 8, 192, 14]`, all values finite, 118,740 parameters.
-
-py -3 scripts/preflight.py --tiny
-tiny_forward_shape = [1, 2, 4, 16, 14]
-tiny_forward_finite = true
-
-py -3 scripts/train.py --tiny --steps 1 --batch-size 1 --device cpu
-steps = 1, finite loss and BER, atomic checkpoint created
-
-py -3 scripts/evaluate_uncoded_ber.py --tiny --snr-points 0,6 --samples-per-point 1 --device cpu
-five finite curves written to outputs/smoke_eval/uncoded_ber_metrics.json
+```powershell
+.\.venv\Scripts\python.exe scripts/preflight.py --device cuda --microbatch-size 28 --generation-batch-size 2 --output outputs/preflight_standard.json
 ```
 
-No cache, 70k-step job, LDPC decoder, or external publication action was started. The full-scale command is guarded by `--confirm-full-run` and remains a user decision.
+Recorded result:
 
-The training implementation also includes the paper's simplified VCL channel-statistic regularization and defaults to sampling 2-4 layers, one or two DMRS symbols, and interference with probability 0.5. The tiny smoke configuration disables random interference and fixes the layer count at two so the check remains deterministic.
+```text
+Python                         3.12
+PyTorch                        2.9.1+cu128
+Sionna                         2.1.0
+GPU                            NVIDIA GeForce RTX 5060 Laptop GPU (8150.6 MiB)
+Backend                        sionna_tr38901_time_domain
+Model parameters               115456
+Configuration coverage         12/12 (2/3/4 layers x 1/2 DMRS x interference off/on)
+Loss / gradients               finite / finite
+Approved effective batch       112
+Approved model microbatch      28
+Approved generation batch      2
+Peak CUDA allocation           4007.0 MiB
+CUDA headroom                  4143.5 MiB
+Measured throughput            12.038 samples/s
+Estimated optimizer step       9.304 s
+Estimated 70000-step runtime   7.538 days
+long_training_ready            true
+```
+
+The estimate is based on warmed runs of all 12 supported configurations, not cold startup. Generation batch 2 avoids the Sionna memory spike; model microbatch 28 reduces accumulation overhead while retaining the exact effective batch 112 and full-batch mVCL statistics. CUDA AMP restores float32 at learned-module boundaries and checkpoints the GradScaler with a verified initial scale of 1.0.
+
+The full trainer additionally checks the preflight configuration fingerprint and approved batch sizes before accepting `--confirm-full-run`. Checkpoints are atomic and include model, optimizer, scaler, schedule position, history, and configuration for exact resume validation.

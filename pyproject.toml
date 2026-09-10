@@ -6,15 +6,16 @@ build-backend = "setuptools.build_meta"
 name = "eqdeeprx-reproduction"
 version = "0.1.0"
 description = "Paper-aligned PyTorch reproduction of the EqDeepRx receiver up to uncoded BER."
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
-  "numpy>=1.23",
-  "matplotlib>=3.7",
-  "torch>=2.1",
+  "numpy>=2.2.6",
+  "matplotlib>=3.10.8",
+  "torch>=2.9.1",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+standard = ["sionna==2.1.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

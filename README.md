@@ -1,70 +1,78 @@
 # EqDeepRx Reproduction
 
-This project reproduces the EqDeepRx receiver from **EqDeepRx: Learning a Scalable and Interference Mitigating MIMO Receiver** (Honkala, Korpi, Raninen, Huttunen) up to uncoded bit error rate (BER). It is a PyTorch implementation that reuses the signal-processing boundary established by the supplied DeepRx OFDM reference while implementing the EqDeepRx hybrid architecture.
+This repository reproduces the primary EqDeepRx receiver from **EqDeepRx: Learning a Scalable and Interference Mitigating MIMO Receiver** through uncoded BER. It intentionally excludes LDPC decoding, BLER, spectral efficiency, DenoiseNN-only, monolithic, and other ablation lines.
 
-The deliverable intentionally stops before LDPC decoding. It reports hard decisions from the learned bit logits and conventional baselines as uncoded BER; it does not claim the paper's post-decoding BLER or spectral-efficiency results.
+The standard path trains one 64-QAM model online on UMa data while randomly covering 2/3/4 MIMO layers, one/two DMRS symbols, and batches with/without one interfering UE. DetectorNN and DemapperNN share weights across layers, so the resulting checkpoint is used for every covered layer count and DMRS configuration without retraining.
 
-## What is implemented
+## Implemented Paper Path
 
-- DMRS-based raw channel estimation, interpolation, complex covariance estimation with shrinkage, parallel RZF and interference-aware LMMSE equalizers, and unit-gain scaling.
-- DenoiseNN on each RX/TX pilot channel pair.
-- Shared-weight per-layer DetectorNN with coordinate maps and full/1:8 residual paths.
-- Shared per-layer DemapperNN with eight output logits; active modulation bits are masked.
-- Direct uncoded QAM targets, equation (13) weighted BCE plus symbol loss, LAMB, and linear learning-rate decay.
-- Paper training distribution: random 2/3/4-layer batches, one or two DMRS symbols, 0.5 probability of an interference-present batch, and simplified VCL channel-statistic regularization.
-- Deterministic tiny smoke generation and a five-curve uncoded-BER evaluator.
+- Sionna 2.1 TR 38.901 UMa/UMi/CDL-C/CDL-D time-domain channels, OFDM modulation/demodulation, AWGN, and an independently faded interfering UE with random timing offset.
+- Orthogonal staggered DMRS, rank-one raw channel estimates, learned per-RX/TX-pair DenoiseNN, and linear interpolation to the full resource grid.
+- Complex OAS shrinkage of the 24-subcarrier INCM, parallel unit-gain LMMSE and RZF (`alpha=1e-4`) equalizers.
+- Shared per-layer DetectorNN with coordinate maps and full/1:8 residual blocks, followed by shared per-layer DemapperNN with eight LLR outputs.
+- Paper loss: bit-0-positive weighted BCE, four DetectorNN symbol losses with `lambda=1e-5`, and mVCL mean/variance regularization with `alpha=1e-5`.
+- LAMB at `4.4e-3`, linear decay to zero, 70,000 optimizer steps, and effective batch 112 (about 7.84 million online samples).
+- Paper Figure 6(a) uncoded-BER protocol: CDL-C, 10-15 m/s, one interferer, realized-SINR binning, and 32,000 validation slots total.
 
-## Paper defaults
+The primary network has **115,456 trainable parameters**, excluding deterministic equalizers, consistent with the paper's rounded 116k count.
 
-The default `paper_config()` uses the EqDeepRx paper's Table I/II settings: 30 kHz SCS, 192 subcarriers, 14 OFDM symbols, 16 RX antennas, 2-4 MIMO layers, UMa training, 64-QAM, SNR 0-45 dB, 1 or 2 DMRS symbols, RZF `alpha=1e-4`, 24-subcarrier INCM coherence bandwidth, batch size 112, LAMB learning rate `4.4e-3`, approximately 70,000 iterations, and symbol-loss weight `1e-5`. The network has 118,740 trainable parameters in this implementation, close to the paper's 116k count excluding equalizers.
+## Environment
 
-## Setup and checks
-
-Run from this directory. A Python 3.9 environment with PyTorch 2.8 and CUDA 12.8 was used for the local verification.
+The delivered environment was verified with Python 3.12, PyTorch 2.9.1+cu128, and Sionna 2.1.0. Run commands from this directory:
 
 ```powershell
-py -3 -m pip install -r requirements.txt
-py -3 -m pytest -q
-py -3 scripts/preflight.py
+.\.venv\Scripts\python.exe -m pip install -r requirements-standard.txt
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-The preflight checks importability, CUDA visibility, model size, input-memory estimate, and does not start training. Use the tiny CPU check when validating a new machine:
+## Smoke Checks
+
+The tiny backend is only for fast CPU regression checks; standard training and Figure 6(a) evaluation require the Sionna time-domain backend.
 
 ```powershell
-py -3 scripts/preflight.py --tiny --device cpu
+.\.venv\Scripts\python.exe scripts/preflight.py --tiny --device cpu
+.\.venv\Scripts\python.exe scripts/train.py --tiny --steps 1 --batch-size 1 --microbatch-size 1 --generation-batch-size 1 --device cpu --output outputs/smoke.pt
+.\.venv\Scripts\python.exe scripts/evaluate_uncoded_ber.py --tiny --sinr-points 0,6 --samples-per-point 1 --device cpu --output-dir outputs/smoke_eval
 ```
 
-## Safe smoke run
+## Full Preflight
 
-The tiny path uses 16 active subcarriers, 2 RX antennas, 2 layers, and a one-step update. It is the required first run before any paper-scale job:
+Run this immediately before long training. It warms up and measures all 12 combinations of 2/3/4 layers, one/two DMRS, and interference absent/present, then writes the configuration gate consumed by the trainer.
 
 ```powershell
-py -3 scripts/train.py --tiny --steps 1 --batch-size 1 --device cpu --output outputs/smoke.pt
-py -3 scripts/evaluate_uncoded_ber.py --tiny --snr-points 0,6 --samples-per-point 1 --device cpu --output-dir outputs/smoke_eval
+.\.venv\Scripts\python.exe scripts/preflight.py --device cuda --microbatch-size 28 --generation-batch-size 2 --output outputs/preflight_standard.json
 ```
 
-## Paper-scale training (not started by default)
+On the verified NVIDIA GeForce RTX 5060 Laptop GPU (8 GiB), this configuration covered all 12 cases with finite loss/gradients, used 4007 MiB peak allocated CUDA memory, measured 12.038 samples/s, and estimated **7.538 days** for 70,000 steps. The optimization keeps the paper algorithm, effective batch, training length, network, loss, and channel distribution unchanged; only CUDA AMP, generation batching, model microbatching, and duplicate CIR computation were optimized.
 
-Run preflight first. The command below is the full training entry point, but it is guarded by an explicit confirmation flag and was not launched as part of this delivery:
+## Full Training
+
+The following is the single formal training command. Do not add `--n-layers` or `--pilot-count`: leaving both unset is what samples every paper configuration into one shared checkpoint.
 
 ```powershell
-py -3 scripts/train.py --steps 70000 --batch-size 112 --n-layers 4 --pilot-count 1 --device cuda --seed 2026 --output checkpoints/eqdeeprx.pt --confirm-full-run
+.\.venv\Scripts\python.exe scripts/train.py --confirm-full-run --steps 70000 --batch-size 112 --microbatch-size 28 --generation-batch-size 2 --device cuda --seed 2026 --preflight-report outputs/preflight_standard.json --output checkpoints/eqdeeprx.pt
 ```
 
-The guard is the `scripts/train.py --confirm-full-run` confirmation; without it, paper-scale training is refused.
-
-The expected memory is dominated by the 112-sample, 16-RX, 192-subcarrier feature maps and activations. Do not run the paper-scale job concurrently with BER Monte Carlo on an 8 GB GPU. Checkpoint files are ignored by Git.
-
-## Uncoded BER evaluation
+Resume an interrupted run without changing its configuration:
 
 ```powershell
-py -3 scripts/evaluate_uncoded_ber.py --checkpoint checkpoints/eqdeeprx.pt --samples-per-point 100 --n-layers 4 --snr-points 0,3,6,9,12,15,18,21 --output-dir outputs/uncoded_ber
+.\.venv\Scripts\python.exe scripts/train.py --confirm-full-run --steps 70000 --batch-size 112 --microbatch-size 28 --generation-batch-size 2 --device cuda --seed 2026 --preflight-report outputs/preflight_standard.json --resume checkpoints/eqdeeprx.pt --output checkpoints/eqdeeprx.pt
 ```
 
-The evaluator writes `uncoded_ber_metrics.json` and `uncoded_ber.png`. It compares EqDeepRx with practical LMMSE, known-channel LMMSE, and one/two-pilot configurations. It does not call an LDPC decoder.
+The full run is never started automatically. The trainer rejects paper-scale runs unless CUDA, exact steps/batch size, configuration fingerprint, and approved preflight batch sizes all match.
 
-## Audit trail
+## Figure 6(a) Uncoded BER
 
-- Paper-to-code and DeepRx inheritance audit: `docs/paper_audit.md`.
-- External open-source search evidence: `docs/open_source_search.md`.
-- Local preflight evidence before full training: `docs/preflight_report.md`.
+After training, generate the requested uncoded-BER result. The 32,000 samples are the total across both DMRS configurations, matching the paper wording, and are binned by realized SINR rather than requested SNR.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/evaluate_uncoded_ber.py --checkpoint checkpoints/eqdeeprx.pt --validation-samples 32000 --evaluation-batch-size 2 --n-layers 4 --device cuda --resume --output-dir outputs/figure6a
+```
+
+The evaluator writes `figure6a_metrics.json`, resumable progress, and `figure6a_uncoded_ber.png`. It reports EqDeepRx and the conventional comparison curves needed to interpret the reproduced EqDeepRx line; it does not run a decoder.
+
+## Reproduction Boundary
+
+All architecture, formulas, and numeric settings stated in the public paper are mapped in `docs/paper_audit.md`. The paper does not publish its original source code, exact FFT/CP selection, TimeMixer subset width, LAMB beta/epsilon/weight decay, seed, exact SINR bin edges, or exact mVCL attachment points. Those necessary choices are recorded rather than presented as author-private facts. Consequently, this is a paper-aligned independent reproduction, not a claim of bit-identical output to unavailable private code.
+
+See `docs/preflight_report.md` for the final readiness evidence and `docs/open_source_search.md` for the public-code search result.

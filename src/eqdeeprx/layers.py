@@ -26,61 +26,89 @@ class DepthwiseSeparableConv(nn.Module):
 
 
 class SubsampledResidualBlock(nn.Module):
-    """EqDeepRx Eq. (11)-(12) with nearest-neighbor frequency subsampling."""
+    """EqDeepRx Eqs. (11)-(12) with nearest-neighbor subsampling.
+
+    The paper's ``f`` applies ReLU, ``1xN`` depthwise-separable convolution,
+    ReLU, and then ``Nx1`` depthwise-separable convolution.  The shortcut is
+    kept at full resolution and is projected only when channel counts differ.
+    """
 
     def __init__(self, in_channels: int, out_channels: int, *, downsample: int = 1, frequency_only: bool = False):
         super().__init__()
         if downsample < 1 or downsample & (downsample - 1):
             raise ValueError("downsample must be a positive power of two")
-        first_kernel = (13, 1) if frequency_only else (13, 1)
-        second_kernel = (13, 1) if frequency_only else (1, 13)
+        first_kernel = (13, 1) if frequency_only else (1, 13)
+        second_kernel = (13, 1)
         self.downsample = int(downsample)
         self.frequency_only = frequency_only
-        self.bn1 = nn.BatchNorm2d(in_channels)
-        self.bn2 = nn.BatchNorm2d(out_channels)
         self.conv1 = DepthwiseSeparableConv(in_channels, out_channels, first_kernel)
         self.conv2 = DepthwiseSeparableConv(out_channels, out_channels, second_kernel)
         self.projection = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False) if in_channels != out_channels else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        shortcut = self.projection(F.relu(self.bn1(x))) if not isinstance(self.projection, nn.Identity) else x
-        residual = F.relu(self.bn1(x))
-        original_size = residual.shape[-2:]
+        shortcut = self.projection(x) if not isinstance(self.projection, nn.Identity) else x
+        original_size = x.shape[-2:]
+        residual = x
         if self.downsample > 1:
             residual = F.interpolate(residual, size=(max(1, original_size[0] // self.downsample), original_size[1]), mode="nearest")
-        residual = self.conv1(residual)
-        residual = self.conv2(F.relu(self.bn2(residual)))
+        residual = self.conv1(F.relu(residual))
+        residual = self.conv2(F.relu(residual))
         if residual.shape[-2:] != original_size:
             residual = F.interpolate(residual, size=original_size, mode="nearest")
         return residual + shortcut
 
 
 class TimeMixer(nn.Module):
-    """Lightweight shared mixer over pilot OFDM-symbol positions."""
+    """Shared pointwise mixer over a small subset of pilot-symbol channels.
 
-    def __init__(self):
+    Pilot symbols are stacked into the input-channel dimension for each
+    subcarrier, mixed with a shared 1x1 convolution, and reshaped back.  The
+    zero padding lets one module serve both the one- and two-DMRS cases.
+    """
+
+    def __init__(self, *, max_symbols: int = 2, mix_channels: int = 2):
         super().__init__()
-        self.conv = nn.Conv1d(1, 1, kernel_size=3, padding=1, bias=False)
+        if max_symbols < 1 or mix_channels < 1:
+            raise ValueError("max_symbols and mix_channels must be positive")
+        self.max_symbols = int(max_symbols)
+        self.mix_channels = int(mix_channels)
+        stacked_channels = self.max_symbols * self.mix_channels
+        self.conv = nn.Conv2d(stacked_channels, stacked_channels, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         n, c, f, s = x.shape
-        mixed = x.permute(0, 1, 2, 3).reshape(n * c * f, 1, s)
-        mixed = self.conv(mixed).reshape(n, c, f, s)
+        if s > self.max_symbols:
+            # The production path supplies the compact one/two-pilot grid.
+            # Keeping longer tensors unchanged makes the layer safe to use in
+            # isolated shape checks and legacy callers.
+            return x
+        selected = x[:, : min(c, self.mix_channels)]
+        selected_channels = selected.shape[1]
+        padded = selected.new_zeros(
+            n, self.mix_channels, f, self.max_symbols
+        )
+        padded[:, :selected_channels, :, :s] = selected
+        stacked = padded.permute(0, 1, 3, 2).reshape(
+            n, self.conv.in_channels, f, 1
+        )
+        mixed = self.conv(stacked).reshape(
+            n, self.mix_channels, self.max_symbols, f
+        )
+        mixed = mixed[:, :selected_channels, :s].permute(0, 1, 3, 2)
+        if selected_channels < c:
+            mixed = torch.cat((mixed, x[:, selected_channels:] * 0.0), dim=1)
         return x + mixed
 
 
 class PointwiseResidualBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        self.bn1 = nn.BatchNorm2d(in_channels)
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=1)
         self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         shortcut = self.shortcut(x)
-        out = self.conv1(F.relu(self.bn1(x)))
-        out = self.conv2(F.relu(self.bn2(out)))
+        out = self.conv1(F.relu(x))
+        out = self.conv2(F.relu(out))
         return out + shortcut
-
