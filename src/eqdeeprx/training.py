@@ -376,6 +376,7 @@ def train_steps(
     scaler = torch.amp.GradScaler(
         "cuda", enabled=amp_enabled, init_scale=AMP_INITIAL_SCALE
     )
+    scaler_reset = False
     history = {
         "steps": 0,
         "losses": [],
@@ -412,10 +413,22 @@ def train_steps(
             raise ValueError("resume checkpoint AMP setting does not match")
         history["amp_enabled"] = amp_enabled
         if "grad_scaler_state_dict" in checkpoint:
-            scaler.load_state_dict(checkpoint["grad_scaler_state_dict"])
+            scaler_state = checkpoint["grad_scaler_state_dict"]
+            try:
+                saved_scale = float(scaler_state.get("scale", AMP_INITIAL_SCALE))
+            except (TypeError, ValueError):
+                saved_scale = float("nan")
+            if math.isfinite(saved_scale) and saved_scale > 0.0:
+                scaler.load_state_dict(scaler_state)
+            else:
+                # A fully backed-off scaler cannot recover from further steps.
+                # Start at the configured scale without changing model math.
+                scaler_reset = True
         start_step = int(checkpoint["next_step"])
         if "python_random_state" in checkpoint:
             random_state.setstate(checkpoint["python_random_state"])
+        if scaler_reset:
+            history["amp_scaler_reset"] = True
     bit_mask = _bit_mask(config, device)
     for step in range(start_step, steps):
         current_layers = n_layers if n_layers is not None else random_state.choice(config.layer_counts)

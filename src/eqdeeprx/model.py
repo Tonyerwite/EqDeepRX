@@ -74,9 +74,12 @@ class DemapperNN(nn.Module):
         self.blocks = nn.ModuleList(blocks)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = x
-        for block in self.blocks:
-            out = block(out)
+        # Demapper activations can exceed float16 range at high-SNR samples.
+        # Keep this learned boundary in float32 while retaining AMP elsewhere.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            out = x.float()
+            for block in self.blocks:
+                out = block(out)
         return out.float()
 
 

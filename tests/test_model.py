@@ -1,5 +1,6 @@
 from dataclasses import replace
 
+import pytest
 import torch
 
 from eqdeeprx.config import paper_config
@@ -246,3 +247,21 @@ def test_model_preserves_float32_boundaries_under_autocast():
     assert logits.dtype == torch.float32
     assert all(state.dtype == torch.float32 for state in aux["symbol_states"])
     assert all(state.dtype == torch.float32 for state in aux["detector_states"])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA AMP regression")
+def test_demapper_is_finite_for_large_features_under_cuda_autocast():
+    demapper = DemapperNN(in_channels=64, widths=(32, 32, 32, 8)).cuda()
+    with torch.no_grad():
+        for module in demapper.modules():
+            if isinstance(module, torch.nn.Conv2d):
+                module.weight.fill_(1.0)
+                if module.bias is not None:
+                    module.bias.zero_()
+    features = torch.full((1, 64, 2, 2), 2_000.0, device="cuda")
+
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        logits = demapper(features)
+
+    assert logits.dtype == torch.float32
+    assert torch.isfinite(logits).all()
