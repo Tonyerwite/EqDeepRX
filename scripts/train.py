@@ -6,12 +6,16 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-import torch
-
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+from eqdeeprx_runtime import configure_runtime_storage
+
+RUNTIME_ROOT = configure_runtime_storage()
+
+import torch
 
 from eqdeeprx.config import paper_config
 from eqdeeprx.model import EqDeepRx
@@ -38,10 +42,15 @@ def build_arg_parser():
     parser.add_argument("--snr-db", type=float, default=None)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output", default="checkpoints/eqdeeprx.pt")
+    parser.add_argument(
+        "--output", default=str(RUNTIME_ROOT / "checkpoints" / "eqdeeprx.pt")
+    )
     parser.add_argument("--resume", default="")
     parser.add_argument("--save-every", type=int, default=500)
-    parser.add_argument("--preflight-report", default="outputs/preflight_standard.json")
+    parser.add_argument(
+        "--preflight-report",
+        default=str(RUNTIME_ROOT / "outputs" / "preflight_standard.json"),
+    )
     parser.add_argument("--tiny", action="store_true", help="Use a CPU-sized 16-subcarrier smoke configuration.")
     parser.add_argument("--confirm-full-run", action="store_true", help="Required for paper-scale runs over 100 steps.")
     return parser

@@ -7,12 +7,16 @@ import sys
 from pathlib import Path
 from time import perf_counter
 
-import torch
-
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+from eqdeeprx_runtime import configure_runtime_storage
+
+RUNTIME_ROOT = configure_runtime_storage()
+
+import torch
 
 from eqdeeprx.config import paper_config
 from eqdeeprx.model import EqDeepRx
@@ -34,7 +38,9 @@ def build_arg_parser():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--microbatch-size", type=int, default=28)
     parser.add_argument("--generation-batch-size", type=int, default=2)
-    parser.add_argument("--output", default="outputs/preflight_standard.json")
+    parser.add_argument(
+        "--output", default=str(RUNTIME_ROOT / "outputs" / "preflight_standard.json")
+    )
     return parser
 
 

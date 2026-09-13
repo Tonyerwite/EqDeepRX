@@ -6,12 +6,16 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-import torch
-
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+from eqdeeprx_runtime import configure_runtime_storage
+
+RUNTIME_ROOT = configure_runtime_storage()
+
+import torch
 
 from eqdeeprx.config import paper_config
 from eqdeeprx.evaluation import evaluate_paper_figure6a, evaluate_uncoded_ber
@@ -25,7 +29,9 @@ from train import tiny_config
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Evaluate EqDeepRx and LMMSE uncoded BER.")
     parser.add_argument("--checkpoint", default="")
-    parser.add_argument("--output-dir", default="outputs/uncoded_ber")
+    parser.add_argument(
+        "--output-dir", default=str(RUNTIME_ROOT / "outputs" / "uncoded_ber")
+    )
     parser.add_argument(
         "--sinr-points",
         "--snr-points",
