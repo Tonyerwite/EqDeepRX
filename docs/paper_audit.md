@@ -17,6 +17,8 @@ The final implementation was checked against the v2 LaTeX source of *EqDeepRx: L
 
 The standard data path is full time-domain Sionna 2.1: online UMa training; independent desired/interfering TR 38.901 channels; OFDM, CP, random interferer timing, AWGN, and resulting ISI/ICI; receiver processing and uncoded hard-bit BER then operate on the demodulated full slot.
 
+The failed run's NaN sequence was traced to float16 overflow in the repeated DetectorNN residual stack: its weights grew finite but a high-SNR forward produced `inf`, making the weighted loss NaN and driving GradScaler to zero. The learned convolution stacks now use CUDA bfloat16 (float32 exponent range) and return float32 at complex/loss boundaries. This is an arithmetic implementation safeguard only; the published network graph, trainable parameters, loss equations, data distribution, batch, schedule, and 70k-step target are unchanged.
+
 ## Published Architecture and Parameters
 
 - DenoiseNN: independent RX/TX pilot pair, real/imag inputs, four frequency-only residual blocks, widths `[64,64,64,2]`, subsampling `[1,4,2,1]`, and pointwise time mixing after each block.
@@ -34,7 +36,7 @@ The supplied DeepRx work established the full-slot tensor convention, DMRS-to-ch
 
 ## Figure 6(a)
 
-`evaluation.py:evaluate_paper_figure6a` requires the Sionna backend and a trained checkpoint, uses CDL-C at 10-15 m/s with one interferer, samples requested SNR and bins errors by realized SINR, and uses 32,000 validation slots total across the two DMRS cases. It produces uncoded BER before LDPC; DenoiseNN-only and decoder-dependent curves are not implemented.
+`evaluation.py:evaluate_paper_figure6a` requires the Sionna backend and a trained checkpoint, uses the paper's three-layer reference configuration with CDL-C at 10-15 m/s and one interferer, samples requested SNR and bins errors by realized SINR, and uses 32,000 validation slots total across the two DMRS cases. Its default SINR centers are `-5,-3,-1,1,3,5,7,9,11,13` dB, matching the published marker grid. The single known-channel curve accumulates both DMRS configurations, as in the public DeepRX reference evaluation. The CLI still accepts `--n-layers 2` or `--n-layers 4` and an explicit `--sinr-points` list for the other supported configurations. It produces uncoded BER before LDPC; DenoiseNN-only and decoder-dependent curves are not implemented.
 
 ## Necessary Reproduction Choices
 

@@ -25,6 +25,11 @@ from .signal import OFDMSystem, bits_per_symbol, qam_demapper_llr
 from .training import compute_ber
 
 
+PAPER_FIGURE6A_SINR_POINTS = tuple(
+    float(value) for value in range(-5, 14, 2)
+)
+
+
 def _baseline_logits(batch, config: EqDeepRxConfig, *, known_channel: bool) -> torch.Tensor:
     raw = estimate_raw_channel(batch.received, batch.pilot_symbols, batch.pilot_mask)
     channel = (
@@ -202,7 +207,7 @@ def evaluate_paper_figure6a(
     sinr_points: Iterable[float] | None = None,
     validation_samples: int | None = None,
     evaluation_batch_size: int = 2,
-    n_layers: int = 4,
+    n_layers: int = 3,
     seed: int = 2026,
     output_dir: Path | None = None,
     resume: bool = False,
@@ -232,7 +237,7 @@ def evaluate_paper_figure6a(
     sinr_centers = [
         float(value)
         for value in (
-            config.evaluation.sinr_db_points
+            PAPER_FIGURE6A_SINR_POINTS
             if sinr_points is None
             else sinr_points
         )
@@ -343,13 +348,12 @@ def evaluate_paper_figure6a(
                         bit_mask,
                     ),
                 }
-                if pilot_count == pilot_counts[0]:
-                    batch_counts["baseline_known_channel"] = _ber_counts_per_sample(
-                        known_logits,
-                        batch.target_bits,
-                        batch.data_mask,
-                        bit_mask,
-                    )
+                batch_counts["baseline_known_channel"] = _ber_counts_per_sample(
+                    known_logits,
+                    batch.target_bits,
+                    batch.data_mask,
+                    bit_mask,
+                )
                 for local_index, bin_index in enumerate(bin_indices.tolist()):
                     if not 0 <= bin_index < len(sinr_centers):
                         continue
@@ -386,6 +390,7 @@ def evaluate_paper_figure6a(
         "validation_samples_total": validation_samples,
         "validation_samples_by_pilot": validation_samples_by_pilot,
         "known_channel_reference_pilot_count": pilot_counts[0],
+        "known_channel_reference_pilot_counts": list(pilot_counts),
         "evaluation_batch_size": evaluation_batch_size,
         "sinr_bin_sample_counts": {
             "1_pilot" if pilot == 1 else "2_pilots": progress["sample_counts"][str(pilot)]
