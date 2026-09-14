@@ -7,7 +7,11 @@ import pytest
 import torch
 
 from eqdeeprx.config import paper_config
-from eqdeeprx.evaluation import evaluate_paper_figure6a, evaluate_uncoded_ber
+from eqdeeprx.evaluation import (
+    PAPER_FIGURE6A_SINR_POINTS,
+    evaluate_paper_figure6a,
+    evaluate_uncoded_ber,
+)
 from eqdeeprx.model import EqDeepRx
 from eqdeeprx.signal import OFDMSystem
 
@@ -18,6 +22,29 @@ def test_figure6a_uses_the_measured_safe_evaluation_batch_size():
     ]
 
     assert parameter.default == 2
+
+
+def test_figure6a_uses_the_paper_three_layer_reference_configuration():
+    parameter = inspect.signature(evaluate_paper_figure6a).parameters[
+        "n_layers"
+    ]
+
+    assert parameter.default == 3
+
+
+def test_figure6a_uses_the_paper_two_db_sinr_grid():
+    assert PAPER_FIGURE6A_SINR_POINTS == (
+        -5.0,
+        -3.0,
+        -1.0,
+        1.0,
+        3.0,
+        5.0,
+        7.0,
+        9.0,
+        11.0,
+        13.0,
+    )
 
 
 def test_uncoded_ber_evaluation_returns_five_finite_curves(tmp_path):
@@ -151,8 +178,9 @@ def test_figure6a_uses_random_snr_and_realized_sinr_bins(tmp_path):
         (tmp_path / "figure6a_progress.json").read_text(encoding="utf-8")
     )
     one_pilot_bits_per_sample = 2 * 4 * 16 * 13
+    two_pilot_bits_per_sample = 2 * 4 * 16 * 12
     assert progress["bits"]["baseline_known_channel"][0] == (
-        one_pilot_bits_per_sample
+        one_pilot_bits_per_sample + two_pilot_bits_per_sample
     )
 
     with pytest.raises(ValueError, match="progress does not match"):

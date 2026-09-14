@@ -18,7 +18,11 @@ RUNTIME_ROOT = configure_runtime_storage()
 import torch
 
 from eqdeeprx.config import paper_config
-from eqdeeprx.evaluation import evaluate_paper_figure6a, evaluate_uncoded_ber
+from eqdeeprx.evaluation import (
+    PAPER_FIGURE6A_SINR_POINTS,
+    evaluate_paper_figure6a,
+    evaluate_uncoded_ber,
+)
 from eqdeeprx.model import EqDeepRx
 from eqdeeprx.signal import OFDMSystem
 from eqdeeprx.training import config_fingerprint
@@ -36,12 +40,12 @@ def build_arg_parser():
         "--sinr-points",
         "--snr-points",
         dest="sinr_points",
-        default="-5,-4,-3,-2,-1,0,1,2,3,4,5,6,7,8,9,10",
+        default=",".join(str(value) for value in PAPER_FIGURE6A_SINR_POINTS),
     )
     parser.add_argument("--validation-samples", type=int, default=None)
     parser.add_argument("--samples-per-point", type=int, default=None)
     parser.add_argument("--evaluation-batch-size", type=int, default=2)
-    parser.add_argument("--n-layers", type=int, default=4, choices=(2, 3, 4))
+    parser.add_argument("--n-layers", type=int, default=3, choices=(2, 3, 4))
     parser.add_argument(
         "--modulation", default=None, choices=("16QAM", "64QAM", "256QAM")
     )

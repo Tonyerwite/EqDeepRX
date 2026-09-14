@@ -265,3 +265,22 @@ def test_demapper_is_finite_for_large_features_under_cuda_autocast():
 
     assert logits.dtype == torch.float32
     assert torch.isfinite(logits).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA AMP regression")
+def test_detector_is_finite_for_large_features_under_cuda_autocast():
+    detector = DetectorNN(channels=64, sections=4).cuda()
+    with torch.no_grad():
+        for module in detector.modules():
+            if isinstance(module, torch.nn.Conv2d):
+                module.weight.fill_(0.5)
+                if module.bias is not None:
+                    module.bias.zero_()
+    features = torch.ones((1, 6, 192, 14), device="cuda")
+
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        output, states = detector(features)
+
+    assert output.dtype == torch.float32
+    assert torch.isfinite(output).all()
+    assert all(state.dtype == torch.float32 and torch.isfinite(state).all() for state in states)

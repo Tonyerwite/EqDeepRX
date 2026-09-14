@@ -43,7 +43,7 @@ Run this immediately before long training. It warms up and measures all 12 combi
 .\.venv\Scripts\python.exe scripts/preflight.py --device cuda --microbatch-size 28 --generation-batch-size 2 --output outputs/preflight_standard.json
 ```
 
-On the verified NVIDIA GeForce RTX 5060 Laptop GPU (8 GiB), this configuration covered all 12 cases with finite loss/gradients, used 4007 MiB peak allocated CUDA memory, measured 12.038 samples/s, and estimated **7.538 days** for 70,000 steps. The optimization keeps the paper algorithm, effective batch, training length, network, loss, and channel distribution unchanged; only CUDA AMP, generation batching, model microbatching, and duplicate CIR computation were optimized.
+On the verified NVIDIA GeForce RTX 5060 Laptop GPU (8 GiB), this configuration covered all 12 cases with finite loss/gradients, used 4007 MiB peak allocated CUDA memory, measured 12.298 samples/s, and estimated **7.378 days** for 70,000 steps. The optimization keeps the paper algorithm, effective batch, training length, network, loss, and channel distribution unchanged; only CUDA AMP (bfloat16 for the learned convolution stacks, float32 at complex/loss boundaries), generation batching, model microbatching, and duplicate CIR computation were optimized.
 
 ## Full Training
 
@@ -63,10 +63,10 @@ The full run is never started automatically. The trainer rejects paper-scale run
 
 ## Figure 6(a) Uncoded BER
 
-After training, generate the requested uncoded-BER result. The 32,000 samples are the total across both DMRS configurations, matching the paper wording, and are binned by realized SINR rather than requested SNR.
+After training, generate the requested uncoded-BER result. The 32,000 samples are the total across both DMRS configurations, matching the paper wording, and are binned by realized SINR rather than requested SNR. The paper-figure reference uses three MIMO layers and SINR points `-5,-3,-1,1,3,5,7,9,11,13` dB; `--n-layers` remains available for the other scalable layer counts.
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/evaluate_uncoded_ber.py --checkpoint checkpoints/eqdeeprx.pt --validation-samples 32000 --evaluation-batch-size 2 --n-layers 4 --device cuda --resume --output-dir outputs/figure6a
+.\.venv\Scripts\python.exe scripts/evaluate_uncoded_ber.py --checkpoint checkpoints/eqdeeprx.pt --validation-samples 32000 --evaluation-batch-size 2 --device cuda --resume --output-dir outputs/figure6a
 ```
 
 The evaluator writes `figure6a_metrics.json`, resumable progress, and `figure6a_uncoded_ber.png`. It reports EqDeepRx and the conventional comparison curves needed to interpret the reproduced EqDeepRx line; it does not run a decoder.

@@ -24,9 +24,18 @@ class DenoiseNN(nn.Module):
         self.mixers = nn.ModuleList(TimeMixer() for _ in widths)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = x
-        for block, mixer in zip(self.blocks, self.mixers):
-            out = mixer(block(out))
+        # Complex channel estimates are represented by real/imaginary pairs.
+        # Use CUDA bfloat16 for the convolutions (float32 exponent range), but
+        # return float32 before constructing the complex channel estimate.
+        denoise_amp = x.device.type == "cuda"
+        with torch.autocast(
+            device_type=x.device.type,
+            dtype=torch.bfloat16,
+            enabled=denoise_amp,
+        ):
+            out = x.float()
+            for block, mixer in zip(self.blocks, self.mixers):
+                out = mixer(block(out))
         return out.float()
 
 
@@ -49,15 +58,24 @@ class DetectorNN(nn.Module):
         self.max_bits = max_bits
 
     def forward(self, x: torch.Tensor, *, return_full_states: bool = False):
-        out = self.project(x)
-        states: List[torch.Tensor] = []
-        full_states: List[torch.Tensor] = []
-        for blocks in self.section_blocks:
-            updated = blocks[1](blocks[0](out))
-            out = out + updated
-            states.append(out[:, :2].float())
-            full_states.append(out.float())
-        out = out.float()
+        # Detector activations are fed to the Demapper and to the VCL loss.
+        # CUDA bfloat16 keeps the float32 exponent range, unlike float16, so
+        # AMP remains fast without allowing the residual stack to overflow.
+        detector_amp = x.device.type == "cuda"
+        with torch.autocast(
+            device_type=x.device.type,
+            dtype=torch.bfloat16,
+            enabled=detector_amp,
+        ):
+            out = self.project(x.float())
+            states: List[torch.Tensor] = []
+            full_states: List[torch.Tensor] = []
+            for blocks in self.section_blocks:
+                updated = blocks[1](blocks[0](out))
+                out = out + updated
+                states.append(out[:, :2].float())
+                full_states.append(out.float())
+            out = out.float()
         if return_full_states:
             return out, states, full_states
         return out, states
