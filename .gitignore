@@ -17,3 +17,11 @@ outputs/*
 *.png
 *.jsonl
 tmp/
+
+# Published reproduction artifacts
+!checkpoints/
+!checkpoints/eqdeeprx_step70000.pt
+!results/
+!results/figure6a_step70000/
+!results/figure6a_step70000/figure6a_metrics.json
+!results/figure6a_step70000/figure6a_uncoded_ber.png
