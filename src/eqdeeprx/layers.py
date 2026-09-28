@@ -33,7 +33,15 @@ class SubsampledResidualBlock(nn.Module):
     kept at full resolution and is projected only when channel counts differ.
     """
 
-    def __init__(self, in_channels: int, out_channels: int, *, downsample: int = 1, frequency_only: bool = False):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        downsample: int = 1,
+        frequency_only: bool = False,
+        projection_bias: bool = False,
+    ):
         super().__init__()
         if downsample < 1 or downsample & (downsample - 1):
             raise ValueError("downsample must be a positive power of two")
@@ -41,9 +49,19 @@ class SubsampledResidualBlock(nn.Module):
         second_kernel = (13, 1)
         self.downsample = int(downsample)
         self.frequency_only = frequency_only
+        self.projection_bias = bool(projection_bias)
         self.conv1 = DepthwiseSeparableConv(in_channels, out_channels, first_kernel)
         self.conv2 = DepthwiseSeparableConv(out_channels, out_channels, second_kernel)
-        self.projection = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False) if in_channels != out_channels else nn.Identity()
+        self.projection = (
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=1,
+                bias=self.projection_bias,
+            )
+            if in_channels != out_channels
+            else nn.Identity()
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         shortcut = self.projection(x) if not isinstance(self.projection, nn.Identity) else x

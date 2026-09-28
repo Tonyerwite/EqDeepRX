@@ -24,12 +24,12 @@ def test_figure6a_uses_the_measured_safe_evaluation_batch_size():
     assert parameter.default == 2
 
 
-def test_figure6a_uses_the_paper_three_layer_reference_configuration():
+def test_figure6a_uses_the_paper_four_layer_reference_configuration():
     parameter = inspect.signature(evaluate_paper_figure6a).parameters[
         "n_layers"
     ]
 
-    assert parameter.default == 3
+    assert parameter.default == 4
 
 
 def test_figure6a_uses_the_paper_two_db_sinr_grid():
@@ -45,6 +45,10 @@ def test_figure6a_uses_the_paper_two_db_sinr_grid():
         11.0,
         13.0,
     )
+
+
+def test_figure6a_sinr_grid_has_one_configuration_source():
+    assert paper_config().evaluation.sinr_db_points == PAPER_FIGURE6A_SINR_POINTS
 
 
 def test_uncoded_ber_evaluation_returns_five_finite_curves(tmp_path):
@@ -158,6 +162,11 @@ def test_figure6a_uses_random_snr_and_realized_sinr_bins(tmp_path):
         n_layers=2,
         seed=41,
         output_dir=tmp_path,
+        checkpoint_provenance={
+            "checkpoint_next_step": 7,
+            "checkpoint_status": "complete",
+            "checkpoint_model_fingerprint": "abc123",
+        },
     )
 
     assert len(system.calls) == 2
@@ -166,11 +175,21 @@ def test_figure6a_uses_random_snr_and_realized_sinr_bins(tmp_path):
     assert all(isinstance(call["snr_db"], torch.Tensor) for call in system.calls)
     assert all(call["snr_db"].shape == (1,) for call in system.calls)
     assert metrics["validation_samples_total"] == 2
+    assert metrics["cdl_delay_spread_mode"] == "uniform_10_1100ns"
+    assert metrics["validation_delay_spread_ns_range"] == [10.0, 1100.0]
+    assert isinstance(metrics["config_fingerprint"], str)
     assert metrics["validation_samples_by_pilot"] == {"1": 1, "2": 1}
     assert metrics["sinr_bin_sample_counts"] == {
         "1_pilot": [1],
         "2_pilots": [1],
     }
+    assert metrics["in_range_sample_count"] == 2
+    assert metrics["out_of_range_sample_count"] == 0
+    assert metrics["in_range_sample_count_by_pilot"] == {"1": 1, "2": 1}
+    assert metrics["out_of_range_sample_count_by_pilot"] == {"1": 0, "2": 0}
+    assert metrics["checkpoint_next_step"] == 7
+    assert metrics["checkpoint_status"] == "complete"
+    assert metrics["checkpoint_model_fingerprint"] == "abc123"
     assert all(values[0] is not None for values in metrics["curves"].values())
     assert (tmp_path / "figure6a_progress.json").exists()
     assert not (tmp_path / "figure6a_progress.json.tmp").exists()
@@ -250,6 +269,39 @@ def test_standard_cli_rejects_checkpoint_from_a_different_modulation(tmp_path):
 
     assert result.returncode != 0
     assert "checkpoint configuration does not match" in result.stderr
+
+
+def test_standard_cli_rejects_model_only_checkpoint_as_incomplete(tmp_path):
+    checkpoint_config = paper_config()
+    checkpoint = tmp_path / "model_only.pt"
+    torch.save(
+        {
+            "model_state_dict": EqDeepRx(checkpoint_config).state_dict(),
+            "config": checkpoint_config,
+        },
+        checkpoint,
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/evaluate_uncoded_ber.py",
+            "--checkpoint",
+            str(checkpoint),
+            "--validation-samples",
+            "1",
+            "--device",
+            "cpu",
+            "--output-dir",
+            str(tmp_path / "evaluation"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "complete formal checkpoint" in result.stderr
 
 
 def test_training_and_evaluation_clis_expose_paper_configuration_entries():

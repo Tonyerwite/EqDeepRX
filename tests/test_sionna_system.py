@@ -161,6 +161,7 @@ def test_sionna_uma_time_domain_batch_has_receiver_contract():
     assert batch.target_bits.shape == (1, 2, 4, 16, 14)
     assert batch.noise_variance.shape == (1,)
     assert batch.sample_rate_hz == pytest.approx(24 * 30_000.0)
+    assert batch.data_mask.shape == (1, 1, 16, 14)
     assert torch.isfinite(batch.received.real).all()
     assert torch.isfinite(batch.true_channel.real).all()
     assert 1e-2 < batch.true_channel.abs().square().mean().item() < 1e2
@@ -179,7 +180,11 @@ def test_system_level_channel_model_is_reused_across_online_batches():
     )
 
     system._system_level_cir(**kwargs)
-    first = system._system_level_channels[("uma", 1, 2, 0)]
+    first = next(
+        value
+        for key, value in system._system_level_channels.items()
+        if key[:4] == ("uma", 1, 2, 0)
+    )
     system._system_level_cir(**kwargs)
     system._system_level_cir(
         **{
@@ -189,7 +194,10 @@ def test_system_level_channel_model_is_reused_across_online_batches():
         }
     )
 
-    assert system._system_level_channels[("uma", 1, 2, 0)] is first
+    assert any(
+        key[:4] == ("uma", 1, 2, 0) and value is first
+        for key, value in system._system_level_channels.items()
+    )
     assert len(system._system_level_channels) == 2
 
 
@@ -246,7 +254,88 @@ def test_sionna_cdl_batch_supports_paper_figure6a_sinr_control():
     pilot_symbols = torch.nonzero(
         batch.pilot_mask.any(dim=(0, 1, 2)), as_tuple=False
     ).flatten()
+    assert batch.data_mask.shape == (1, 1, 16, 14)
     assert torch.count_nonzero(batch.data_mask[..., pilot_symbols]) == 0
+
+
+def test_sionna_two_dmrs_symbols_reuse_the_same_qpsk_pilot_sequence():
+    config = _tiny_standard_config()
+    system = SionnaTR38901System(config, device="cpu")
+    batch = system.generate_batch(
+        batch_size=1,
+        n_layers=2,
+        pilot_count=2,
+        snr_db=20.0,
+        seed=24,
+        add_interference=False,
+        channel_model="CDL-C",
+        speed_mps_range=(10.0, 15.0),
+        return_true_channel=False,
+    )
+    symbols = config.receiver.dmrs_symbols[:2]
+    active = batch.pilot_mask[0, :, :, symbols[0]] > 0
+    first = batch.pilot_symbols[0, :, :, symbols[0]]
+    second = batch.pilot_symbols[0, :, :, symbols[1]]
+    assert torch.equal(first[active], second[active])
+
+
+def test_cdl_validation_samples_the_explicit_default_delay_spread_choice():
+    config = _tiny_standard_config()
+    system = SionnaTR38901System(config, device="cpu")
+    observed = []
+    original = system._CDL
+
+    def recording_cdl(*args, **kwargs):
+        observed.append(kwargs["delay_spread"])
+        return original(*args, **kwargs)
+
+    system._CDL = recording_cdl
+    system.generate_batch(
+        batch_size=1,
+        n_layers=2,
+        pilot_count=1,
+        snr_db=20.0,
+        seed=27,
+        add_interference=True,
+        channel_model="CDL-C",
+        speed_mps_range=(10.0, 15.0),
+        return_true_channel=False,
+    )
+
+    assert observed
+    assert all(10e-9 <= value <= 1100e-9 for value in observed)
+
+
+def test_cdl_validation_fixed_delay_spread_is_explicitly_exploratory():
+    base = _tiny_standard_config()
+    config = replace(
+        base,
+        channel=replace(base.channel, cdl_delay_spread_mode="fixed"),
+        cdl_delay_spread_ns=300.0,
+    )
+    system = SionnaTR38901System(config, device="cpu")
+    observed = []
+    original = system._CDL
+
+    def recording_cdl(*args, **kwargs):
+        observed.append(kwargs["delay_spread"])
+        return original(*args, **kwargs)
+
+    system._CDL = recording_cdl
+    system.generate_batch(
+        batch_size=1,
+        n_layers=2,
+        pilot_count=1,
+        snr_db=20.0,
+        seed=27,
+        add_interference=True,
+        channel_model="CDL-C",
+        speed_mps_range=(10.0, 15.0),
+        return_true_channel=False,
+    )
+
+    assert observed
+    assert all(value == pytest.approx(300e-9) for value in observed)
 
 
 def test_time_channel_window_covers_the_longest_configured_cdl_d_path():

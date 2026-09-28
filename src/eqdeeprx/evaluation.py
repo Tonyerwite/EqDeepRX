@@ -13,7 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 
-from .config import EqDeepRxConfig
+from .config import EqDeepRxConfig, FIGURE6A_SINR_POINTS
 from .receiver import (
     estimate_incm,
     estimate_raw_channel,
@@ -23,11 +23,11 @@ from .receiver import (
 )
 from .signal import OFDMSystem, bits_per_symbol, qam_demapper_llr
 from .training import compute_ber
+from .training import config_fingerprint
 
 
-PAPER_FIGURE6A_SINR_POINTS = tuple(
-    float(value) for value in range(-5, 14, 2)
-)
+# Re-export the paper grid for callers that historically imported it here.
+PAPER_FIGURE6A_SINR_POINTS = FIGURE6A_SINR_POINTS
 
 
 def _baseline_logits(batch, config: EqDeepRxConfig, *, known_channel: bool) -> torch.Tensor:
@@ -131,6 +131,8 @@ def _new_figure6a_progress(
         "sample_counts": {
             str(pilot): [0] * n_bins for pilot in pilot_counts
         },
+        "in_range_sample_count": {str(pilot): 0 for pilot in pilot_counts},
+        "out_of_range_sample_count": {str(pilot): 0 for pilot in pilot_counts},
     }
 
 
@@ -207,10 +209,11 @@ def evaluate_paper_figure6a(
     sinr_points: Iterable[float] | None = None,
     validation_samples: int | None = None,
     evaluation_batch_size: int = 2,
-    n_layers: int = 3,
+    n_layers: int = 4,
     seed: int = 2026,
     output_dir: Path | None = None,
     resume: bool = False,
+    checkpoint_provenance: Dict | None = None,
 ) -> Dict:
     """Evaluate Figure 6(a) using random SNR/INR and realized-SINR bins."""
 
@@ -268,6 +271,9 @@ def evaluate_paper_figure6a(
         "seed": seed,
         "modulation": config.modulation,
         "channel_model": config.evaluation.channel_model,
+        "cdl_delay_spread_mode": config.channel.cdl_delay_spread_mode,
+        "cdl_delay_spread_ns": config.cdl_delay_spread_ns,
+        "validation_delay_spread_ns_range": list(config.delay_spread_ns_range),
         "speed_mps_range": list(config.evaluation.speed_mps_range),
         "snr_db_range": list(config.snr_db_range),
         "pilot_counts": list(pilot_counts),
@@ -356,7 +362,9 @@ def evaluate_paper_figure6a(
                 )
                 for local_index, bin_index in enumerate(bin_indices.tolist()):
                     if not 0 <= bin_index < len(sinr_centers):
+                        progress["out_of_range_sample_count"][str(pilot_count)] += 1
                         continue
+                    progress["in_range_sample_count"][str(pilot_count)] += 1
                     progress["sample_counts"][str(pilot_count)][bin_index] += 1
                     for name, (errors, bits) in batch_counts.items():
                         progress["errors"][name][bin_index] += float(errors[local_index])
@@ -396,10 +404,29 @@ def evaluate_paper_figure6a(
             "1_pilot" if pilot == 1 else "2_pilots": progress["sample_counts"][str(pilot)]
             for pilot in pilot_counts
         },
+        # Keep pooled numerators/denominators alongside the plotted ratios.
+        # Exploratory sensitivity comparisons must not give every sparsely
+        # populated bin the same weight or infer a value from an empty bin.
+        "curve_error_counts": progress["errors"],
+        "curve_bit_counts": progress["bits"],
+        "in_range_sample_count_by_pilot": progress["in_range_sample_count"],
+        "out_of_range_sample_count_by_pilot": progress["out_of_range_sample_count"],
+        "in_range_sample_count": sum(progress["in_range_sample_count"].values()),
+        "out_of_range_sample_count": sum(progress["out_of_range_sample_count"].values()),
         "n_layers": n_layers,
         "seed": seed,
+        "cdl_delay_spread_mode": config.channel.cdl_delay_spread_mode,
+        "cdl_delay_spread_ns": config.cdl_delay_spread_ns,
+        "validation_delay_spread_ns_range": list(config.delay_spread_ns_range),
         "curves": curves,
+        "config_fingerprint": config_fingerprint(config),
     }
+    if checkpoint_provenance:
+        metrics.update({
+            "checkpoint_next_step": checkpoint_provenance.get("checkpoint_next_step"),
+            "checkpoint_status": checkpoint_provenance.get("checkpoint_status"),
+            "checkpoint_model_fingerprint": checkpoint_provenance.get("checkpoint_model_fingerprint"),
+        })
     if output_dir is not None:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)

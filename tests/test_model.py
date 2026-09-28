@@ -249,6 +249,14 @@ def test_model_preserves_float32_boundaries_under_autocast():
     assert all(state.dtype == torch.float32 for state in aux["detector_states"])
 
 
+def test_model_accepts_float32_amp_boundary_choice():
+    base = _tiny_config()
+    config = replace(base, training=replace(base.training, amp_dtype="float32"))
+    model = EqDeepRx(config)
+    assert model.denoise.amp_dtype == torch.float32
+    assert model.detector.amp_dtype == torch.float32
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA AMP regression")
 def test_demapper_is_finite_for_large_features_under_cuda_autocast():
     demapper = DemapperNN(in_channels=64, widths=(32, 32, 32, 8)).cuda()

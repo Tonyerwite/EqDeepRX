@@ -10,18 +10,47 @@ from .layers import PointwiseResidualBlock, SubsampledResidualBlock, TimeMixer
 from .receiver import estimate_incm, estimate_raw_channel, interpolate_channel, lmmse_equalize, rzf_equalize
 
 
+def _resolve_amp_dtype(value: str | torch.dtype) -> torch.dtype:
+    if isinstance(value, torch.dtype):
+        return value
+    if value == "bfloat16":
+        return torch.bfloat16
+    if value == "float32":
+        return torch.float32
+    raise ValueError("amp dtype must be bfloat16 or float32")
+
+
 class DenoiseNN(nn.Module):
-    def __init__(self, *, widths: Tuple[int, ...] = (64, 64, 64, 2), subsamples: Tuple[int, ...] = (1, 4, 2, 1)):
+    def __init__(
+        self,
+        *,
+        widths: Tuple[int, ...] = (64, 64, 64, 2),
+        subsamples: Tuple[int, ...] = (1, 4, 2, 1),
+        time_mixer_channels: int = 2,
+        residual_projection_bias: bool = False,
+        amp_dtype: str | torch.dtype = torch.bfloat16,
+    ):
         super().__init__()
+        self.amp_dtype = _resolve_amp_dtype(amp_dtype)
         if len(widths) != len(subsamples):
             raise ValueError("widths and subsamples must have equal length")
         blocks = []
         in_channels = 2
         for width, downsample in zip(widths, subsamples):
-            blocks.append(SubsampledResidualBlock(in_channels, width, downsample=downsample, frequency_only=True))
+            blocks.append(
+                SubsampledResidualBlock(
+                    in_channels,
+                    width,
+                    downsample=downsample,
+                    frequency_only=True,
+                    projection_bias=residual_projection_bias,
+                )
+            )
             in_channels = width
         self.blocks = nn.ModuleList(blocks)
-        self.mixers = nn.ModuleList(TimeMixer() for _ in widths)
+        self.mixers = nn.ModuleList(
+            TimeMixer(mix_channels=time_mixer_channels) for _ in widths
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Complex channel estimates are represented by real/imaginary pairs.
@@ -30,8 +59,8 @@ class DenoiseNN(nn.Module):
         denoise_amp = x.device.type == "cuda"
         with torch.autocast(
             device_type=x.device.type,
-            dtype=torch.bfloat16,
-            enabled=denoise_amp,
+            dtype=self.amp_dtype,
+            enabled=denoise_amp and self.amp_dtype != torch.float32,
         ):
             out = x.float()
             for block, mixer in zip(self.blocks, self.mixers):
@@ -40,8 +69,9 @@ class DenoiseNN(nn.Module):
 
 
 class DetectorNN(nn.Module):
-    def __init__(self, *, channels: int = 64, sections: int = 4, max_bits: int = 8, detector_subsample: int = 8):
+    def __init__(self, *, channels: int = 64, sections: int = 4, max_bits: int = 8, detector_subsample: int = 8, residual_projection_bias: bool = False, amp_dtype: str | torch.dtype = torch.bfloat16):
         super().__init__()
+        self.amp_dtype = _resolve_amp_dtype(amp_dtype)
         self.channels = channels
         self.sections = sections
         self.project = nn.Conv2d(6, channels, kernel_size=1)
@@ -50,8 +80,20 @@ class DetectorNN(nn.Module):
             self.section_blocks.append(
                 nn.ModuleList(
                     [
-                        SubsampledResidualBlock(channels, channels, downsample=1, frequency_only=False),
-                        SubsampledResidualBlock(channels, channels, downsample=detector_subsample, frequency_only=False),
+                        SubsampledResidualBlock(
+                            channels,
+                            channels,
+                            downsample=1,
+                            frequency_only=False,
+                            projection_bias=residual_projection_bias,
+                        ),
+                        SubsampledResidualBlock(
+                            channels,
+                            channels,
+                            downsample=detector_subsample,
+                            frequency_only=False,
+                            projection_bias=residual_projection_bias,
+                        ),
                     ]
                 )
             )
@@ -64,8 +106,8 @@ class DetectorNN(nn.Module):
         detector_amp = x.device.type == "cuda"
         with torch.autocast(
             device_type=x.device.type,
-            dtype=torch.bfloat16,
-            enabled=detector_amp,
+            dtype=self.amp_dtype,
+            enabled=detector_amp and self.amp_dtype != torch.float32,
         ):
             out = self.project(x.float())
             states: List[torch.Tensor] = []
@@ -109,12 +151,20 @@ class EqDeepRx(nn.Module):
         self.config = config or EqDeepRxConfig()
         self.model_config = model_config or self.config.model
         self.n_rx = self.config.n_rx_antennas
-        self.denoise = DenoiseNN(widths=self.model_config.denoise_widths, subsamples=self.model_config.denoise_subsamples)
+        self.denoise = DenoiseNN(
+            widths=self.model_config.denoise_widths,
+            subsamples=self.model_config.denoise_subsamples,
+            time_mixer_channels=self.model_config.time_mixer_channels,
+            residual_projection_bias=self.model_config.residual_projection_bias,
+            amp_dtype=self.config.training.amp_dtype,
+        )
         self.detector = DetectorNN(
             channels=self.model_config.detector_channels,
             sections=self.model_config.detector_sections,
             max_bits=self.model_config.max_bits,
             detector_subsample=self.model_config.detector_subsample,
+            residual_projection_bias=self.model_config.residual_projection_bias,
+            amp_dtype=self.config.training.amp_dtype,
         )
         self.demapper = DemapperNN(in_channels=self.model_config.detector_channels, widths=self.model_config.demapper_widths)
 

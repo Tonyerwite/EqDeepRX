@@ -136,6 +136,30 @@ class OFDMSystem:
         first = (self.config.n_fft - self.config.n_subcarriers) // 2
         return full[:, :, first : first + self.config.n_subcarriers]
 
+    @staticmethod
+    def _shift_interference_waveform(
+        waveform: torch.Tensor, offsets: torch.Tensor
+    ) -> torch.Tensor:
+        """Apply per-slot timing offsets along the continuous time axis.
+
+        The fast backend stores waveforms as ``[batch, RX, time, symbol]``.
+        After selecting one batch item, axis 1 is the time axis; the RX axis
+        must remain unchanged.  This mirrors the Sionna backend's circular
+        shift of its final (time) dimension.
+        """
+
+        if waveform.ndim != 4:
+            raise ValueError("waveform must have shape [batch, RX, time, symbol]")
+        offsets = torch.as_tensor(offsets, device=waveform.device).flatten()
+        if offsets.numel() != waveform.shape[0]:
+            raise ValueError("offsets must contain one value per batch sample")
+        shifted = waveform.clone()
+        for index, offset in enumerate(offsets.tolist()):
+            shifted[index] = torch.roll(
+                waveform[index], shifts=int(offset), dims=1
+            )
+        return shifted
+
     def _channel(self, batch_size: int, n_layers: int, generator: torch.Generator) -> torch.Tensor:
         nr, f, s = self.config.n_rx_antennas, self.config.n_subcarriers, self.config.n_ofdm_symbols
         sample_rate = self.config.sample_rate_hz
@@ -166,6 +190,28 @@ class OFDMSystem:
         steering = torch.exp(1j * phase).unsqueeze(-1)
         return (taps.unsqueeze(3) * steering).sum(dim=4)
 
+    def _interference_timing_offsets(
+        self,
+        *,
+        batch_size: int,
+        waveform_length: int,
+        generator: torch.Generator,
+    ) -> torch.Tensor:
+        """Sample the same timing modes as the time-domain Sionna backend."""
+
+        if batch_size < 1 or waveform_length < 1:
+            raise ValueError("batch_size and waveform_length must be positive")
+        mode = self.config.channel.interferer_timing
+        if mode == "zero":
+            return torch.zeros(batch_size, dtype=torch.long)
+        if mode == "random_symbol":
+            upper = self.config.n_fft + self.config.cyclic_prefix
+        elif mode == "random_sample":
+            upper = waveform_length
+        else:
+            raise ValueError(f"unsupported interferer timing mode: {mode}")
+        return torch.randint(0, max(1, int(upper)), (batch_size,), generator=generator)
+
     def generate_batch(
         self,
         *,
@@ -184,14 +230,26 @@ class OFDMSystem:
         bps = bits_per_symbol(self.config.modulation)
         pilot_mask_one = self._pilot_layout(n_layers, pilot_count)
         pilot_mask = pilot_mask_one.unsqueeze(0).expand(batch_size, -1, -1, -1).clone()
+        # Match Sionna's KroneckerPilotPattern: the selected DMRS symbols are
+        # reserved as pilot symbols across the resource grid, while pilot
+        # energy itself is staggered across layers/subcarriers.
         pilot_ofdm_symbols = pilot_mask.any(dim=(1, 2))
         data_mask = (~pilot_ofdm_symbols[:, None, None, :]).expand(
             -1, 1, self.config.n_subcarriers, -1
         ).to(torch.float32).clone()
         bits = torch.randint(0, 2, (batch_size, n_layers, self.config.n_subcarriers, self.config.n_ofdm_symbols, bps), generator=generator).float().to(self.device)
         data_symbols = qam_modulate(bits, self.config.modulation)
-        pilot_signs = torch.randint(0, 2, pilot_mask.shape, generator=generator).float().to(self.device) * 2.0 - 1.0
-        pilot_imag = torch.randint(0, 2, pilot_mask.shape, generator=generator).float().to(self.device) * 2.0 - 1.0
+        # Sionna's Kronecker pilot pattern reuses each layer's QPSK sequence
+        # on every selected DMRS symbol; only the staggered RE mask changes.
+        pilot_base_shape = pilot_mask.shape[:-1] + (1,)
+        pilot_signs = torch.randint(
+            0, 2, pilot_base_shape, generator=generator
+        ).float().to(self.device) * 2.0 - 1.0
+        pilot_imag = torch.randint(
+            0, 2, pilot_base_shape, generator=generator
+        ).float().to(self.device) * 2.0 - 1.0
+        pilot_signs = pilot_signs.expand_as(pilot_mask)
+        pilot_imag = pilot_imag.expand_as(pilot_mask)
         pilot_symbols = (pilot_signs + 1j * pilot_imag) / math.sqrt(2.0) * pilot_mask
         transmitted = data_symbols * data_mask + pilot_symbols
         target_bits = bits.permute(0, 1, 4, 2, 3).contiguous() * data_mask.unsqueeze(1)
@@ -206,7 +264,13 @@ class OFDMSystem:
         received_waveform = torch.fft.ifft(received_full_fft, dim=2)
         cp = received_waveform[:, :, -self.config.cyclic_prefix :]
         received_waveform = torch.cat((cp, received_waveform), dim=2)
-        signal_power = received_waveform.abs().square().mean(dim=(1, 2), keepdim=True)
+        # Keep the sample axis separate from RX/time/OFDM-symbol axes.  A
+        # three-dimensional ``[batch, 1, 1]`` tensor broadcasts incorrectly
+        # against the four-dimensional waveform whenever batch size differs
+        # from the antenna count.
+        signal_power = received_waveform.abs().square().mean(
+            dim=(1, 2, 3), keepdim=True
+        )
         requested_snr = torch.as_tensor(
             snr_db, dtype=signal_power.dtype, device=self.device
         ).flatten()
@@ -215,7 +279,7 @@ class OFDMSystem:
         if requested_snr.numel() != batch_size:
             raise ValueError("snr_db must be scalar or have one value per sample")
         noise_variance = signal_power / torch.pow(
-            10.0, requested_snr.view(batch_size, 1, 1) / 10.0
+            10.0, requested_snr.view(batch_size, 1, 1, 1) / 10.0
         )
         noise = (torch.randn(received_waveform.shape, generator=generator) + 1j * torch.randn(received_waveform.shape, generator=generator)).to(self.device)
         received_waveform = received_waveform + noise * torch.sqrt(noise_variance / 2.0)
@@ -228,12 +292,23 @@ class OFDMSystem:
             interference_full[:, :, start : start + self.config.n_subcarriers] = interference_grid
             interference_waveform = torch.fft.ifft(interference_full, dim=2)
             interference_waveform = torch.cat((interference_waveform[:, :, -self.config.cyclic_prefix :], interference_waveform), dim=2)
-            timing_offsets = torch.randint(0, max(1, self.config.cyclic_prefix), (batch_size,), generator=generator)
-            for index, offset in enumerate(timing_offsets.tolist()):
-                interference_waveform[index] = torch.roll(interference_waveform[index], shifts=int(offset), dims=1)
-            inr_db = 10.0 + 5.0 * torch.randn(batch_size, generator=generator)
-            target_power = noise_variance * (10.0 ** (inr_db.to(self.device).view(batch_size, 1, 1) / 10.0))
-            actual_power = interference_waveform.abs().square().mean(dim=(1, 2), keepdim=True).clamp_min(1e-12)
+            timing_offsets = self._interference_timing_offsets(
+                batch_size=batch_size,
+                waveform_length=interference_waveform.shape[2],
+                generator=generator,
+            )
+            interference_waveform = self._shift_interference_waveform(
+                interference_waveform, timing_offsets
+            )
+            inr_db = self.config.training.inr_mean_db + self.config.training.inr_std_db * torch.randn(
+                batch_size, generator=generator
+            )
+            target_power = noise_variance * (
+                10.0 ** (inr_db.to(self.device).view(batch_size, 1, 1, 1) / 10.0)
+            )
+            actual_power = interference_waveform.abs().square().mean(
+                dim=(1, 2, 3), keepdim=True
+            ).clamp_min(1e-12)
             interference_waveform = interference_waveform * torch.sqrt(target_power / actual_power)
             received_waveform = received_waveform + interference_waveform
         received = self._demodulate(received_waveform)

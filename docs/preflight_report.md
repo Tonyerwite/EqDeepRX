@@ -1,6 +1,39 @@
-# Final Preflight Report
+# CUDA Preflight Evidence
 
-The formal CUDA preflight was run with the delivered Sionna/PyTorch environment and did not start the 70,000-step job.
+The repository's historical preflight record (from the earlier published
+commit) is retained below for provenance, but it is not evidence for the
+current working tree. The current audit has not started the 70,000-step job.
+
+## Current working-tree measurement
+
+The latest uncontended measurement was written to
+`D:\EqDeepRxRuns\audits\preflight_after_gpu_clear.json` on 2026-09-25 after
+the other GPU jobs had exited. It reported:
+
+```text
+GPU                            NVIDIA GeForce RTX 5060 Laptop GPU
+Backend                        sionna_tr38901_time_domain
+Model parameters               115456
+Configuration coverage         12/12 (2/3/4 layers x 1/2 DMRS x interference off/on)
+Loss / gradients               finite / finite
+Measured optimizer step        9.933 s
+Estimated 70000-step runtime   8.047 days
+long_training_ready            false
+```
+
+This is a measured runtime estimate, not a training result. The estimate is
+0.047 days over the repository's advisory eight-day convenience threshold;
+the user has explicitly waived that convenience threshold for this task. It
+must remain visible in status reports, but it is not by itself a launch
+blocker. The 12/12 configuration coverage, finite loss/gradients, and 4.0 GiB
+of measured CUDA headroom are valid evidence that the implementation can
+execute the standard path. Numerical-safety and checkpoint-contract gates
+remain mandatory.
+
+## Historical measurement
+
+The values below came from the earlier published commit and are kept only to
+show why they cannot be reused without a fresh run:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/preflight.py --device cuda --microbatch-size 28 --generation-batch-size 2 --output outputs/preflight_standard.json

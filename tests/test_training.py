@@ -16,6 +16,7 @@ from eqdeeprx.losses import (
 from eqdeeprx.signal import OFDMSystem
 from eqdeeprx.training import (
     Lamb,
+    _make_nonfinite_checkpoint_path,
     config_fingerprint,
     estimate_training_runtime,
     paper_learning_rate,
@@ -669,3 +670,226 @@ def test_training_resume_matches_an_uninterrupted_run(tmp_path):
         torch.equal(uninterrupted.state_dict()[name], resumed.state_dict()[name])
         for name in uninterrupted.state_dict()
     )
+
+
+def test_training_resume_rejects_missing_optimizer_state(tmp_path):
+    config = _tiny_config()
+    output = tmp_path / "valid.pt"
+    train_steps(
+        EqDeepRx(config),
+        OFDMSystem(config),
+        config,
+        steps=1,
+        batch_size=1,
+        n_layers=2,
+        pilot_count=1,
+        snr_db=12.0,
+        seed=31,
+        output_path=output,
+    )
+    broken = torch.load(output, map_location="cpu", weights_only=False)
+    state = broken["optimizer_state_dict"]["state"]
+    state.pop(next(iter(state)))
+    broken_path = tmp_path / "missing-state.pt"
+    torch.save(broken, broken_path)
+
+    with pytest.raises(ValueError, match="optimizer state consistency"):
+        train_steps(
+            EqDeepRx(config),
+            OFDMSystem(config),
+            config,
+            steps=2,
+            batch_size=1,
+            n_layers=2,
+            pilot_count=1,
+            snr_db=12.0,
+            seed=31,
+            resume_path=broken_path,
+        )
+
+
+def test_training_resume_rejects_history_length_mismatch(tmp_path):
+    config = _tiny_config()
+    output = tmp_path / "valid.pt"
+    train_steps(
+        EqDeepRx(config),
+        OFDMSystem(config),
+        config,
+        steps=1,
+        batch_size=1,
+        n_layers=2,
+        pilot_count=1,
+        snr_db=12.0,
+        seed=32,
+        output_path=output,
+    )
+    broken = torch.load(output, map_location="cpu", weights_only=False)
+    broken["history"]["losses"].clear()
+    broken_path = tmp_path / "history-mismatch.pt"
+    torch.save(broken, broken_path)
+
+    with pytest.raises(ValueError, match="history consistency"):
+        train_steps(
+            EqDeepRx(config),
+            OFDMSystem(config),
+            config,
+            steps=2,
+            batch_size=1,
+            n_layers=2,
+            pilot_count=1,
+            snr_db=12.0,
+            seed=32,
+            resume_path=broken_path,
+        )
+
+
+def test_training_resume_rejects_malformed_config_payload(tmp_path):
+    config = _tiny_config()
+    output = tmp_path / "valid.pt"
+    train_steps(
+        EqDeepRx(config),
+        OFDMSystem(config),
+        config,
+        steps=1,
+        batch_size=1,
+        n_layers=2,
+        pilot_count=1,
+        snr_db=12.0,
+        seed=35,
+        output_path=output,
+    )
+    broken = torch.load(output, map_location="cpu", weights_only=False)
+    broken["config"] = {}
+    broken_path = tmp_path / "malformed-config.pt"
+    torch.save(broken, broken_path)
+
+    with pytest.raises(ValueError, match="configuration"):
+        train_steps(
+            EqDeepRx(config),
+            OFDMSystem(config),
+            config,
+            steps=2,
+            batch_size=1,
+            n_layers=2,
+            pilot_count=1,
+            snr_db=12.0,
+            seed=35,
+            resume_path=broken_path,
+        )
+
+
+def test_nonfinite_update_stops_without_replacing_formal_checkpoint(tmp_path, monkeypatch):
+    config = _tiny_config()
+    output = tmp_path / "formal.pt"
+
+    def nan_loss(logits, *args, **kwargs):
+        return logits.sum() * torch.tensor(float("nan"), device=logits.device)
+
+    monkeypatch.setattr(training_module, "eqdeeprx_loss", nan_loss)
+    with pytest.raises(FloatingPointError, match="non-finite"):
+        train_steps(
+            EqDeepRx(config),
+            OFDMSystem(config),
+            config,
+            steps=1,
+            batch_size=1,
+            n_layers=2,
+            pilot_count=1,
+            snr_db=12.0,
+            seed=33,
+            output_path=output,
+        )
+
+    assert not output.exists()
+    anomalies = list(tmp_path.glob("formal.nonfinite_step0*.pt"))
+    assert len(anomalies) == 1
+    anomaly = torch.load(anomalies[0], map_location="cpu", weights_only=False)
+    assert anomaly["checkpoint_status"] == "nonfinite"
+    assert anomaly["failed_step"] == 0
+    assert anomaly["next_step"] == 0
+    assert anomaly["python_random_state"] is not None
+
+
+def test_nonfinite_checkpoint_paths_never_overwrite_prior_anomaly(tmp_path):
+    formal = tmp_path / "formal.pt"
+    first = _make_nonfinite_checkpoint_path(formal, 7)
+    first.write_bytes(b"first anomaly")
+    second = _make_nonfinite_checkpoint_path(formal, 7)
+
+    assert second != first
+    assert second.name.startswith("formal.nonfinite_step7")
+
+
+def test_resume_restores_rng_and_optimizer_state_exactly(tmp_path):
+    config = _tiny_config()
+    uninterrupted_path = tmp_path / "uninterrupted.pt"
+    segmented_path = tmp_path / "segmented.pt"
+
+    torch.manual_seed(101)
+    uninterrupted = EqDeepRx(config)
+    uninterrupted_history = train_steps(
+        uninterrupted,
+        OFDMSystem(config),
+        config,
+        steps=2,
+        batch_size=1,
+        n_layers=2,
+        pilot_count=1,
+        snr_db=12.0,
+        seed=34,
+        output_path=uninterrupted_path,
+    )
+
+    torch.manual_seed(101)
+    segmented = EqDeepRx(config)
+    train_steps(
+        segmented,
+        OFDMSystem(config),
+        config,
+        steps=1,
+        batch_size=1,
+        n_layers=2,
+        pilot_count=1,
+        snr_db=12.0,
+        seed=34,
+        output_path=segmented_path,
+    )
+    resumed = EqDeepRx(config)
+    resumed_history = train_steps(
+        resumed,
+        OFDMSystem(config),
+        config,
+        steps=2,
+        batch_size=1,
+        n_layers=2,
+        pilot_count=1,
+        snr_db=12.0,
+        seed=34,
+        output_path=segmented_path,
+        resume_path=segmented_path,
+    )
+
+    expected = torch.load(uninterrupted_path, map_location="cpu", weights_only=False)
+    actual = torch.load(segmented_path, map_location="cpu", weights_only=False)
+    assert resumed_history == uninterrupted_history
+    assert actual["python_random_state"] == expected["python_random_state"]
+    assert torch.equal(actual["torch_rng_state"], expected["torch_rng_state"])
+    assert all(
+        torch.equal(actual["cuda_rng_state_all"][i], expected["cuda_rng_state_all"][i])
+        for i in range(len(expected["cuda_rng_state_all"]))
+    ) if torch.cuda.is_available() else "cuda_rng_state_all" not in actual
+    expected_optimizer = expected["optimizer_state_dict"]
+    actual_optimizer = actual["optimizer_state_dict"]
+    assert actual_optimizer["param_groups"] == expected_optimizer["param_groups"]
+    assert actual_optimizer["state"].keys() == expected_optimizer["state"].keys()
+    for key in expected_optimizer["state"]:
+        expected_state = expected_optimizer["state"][key]
+        actual_state = actual_optimizer["state"][key]
+        assert actual_state.keys() == expected_state.keys()
+        for field in expected_state:
+            expected_value = expected_state[field]
+            actual_value = actual_state[field]
+            if isinstance(expected_value, torch.Tensor):
+                assert torch.equal(actual_value, expected_value)
+            else:
+                assert actual_value == expected_value

@@ -9,6 +9,7 @@ checkpoints/
 data/
 outputs/*
 !outputs/.gitkeep
+results/
 *.pt
 *.pth
 *.ckpt
@@ -16,12 +17,9 @@ outputs/*
 *.npz
 *.png
 *.jsonl
+*.log
 tmp/
+tmp_*.txt
 
-# Published reproduction artifacts
-!checkpoints/
-!checkpoints/eqdeeprx_step70000.pt
-!results/
-!results/figure6a_step70000/
-!results/figure6a_step70000/figure6a_metrics.json
-!results/figure6a_step70000/figure6a_uncoded_ber.png
+# Runtime checkpoints, plots, and metrics remain local until they pass the
+# clean-run provenance audit.

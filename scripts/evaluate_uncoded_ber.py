@@ -20,12 +20,13 @@ import torch
 from eqdeeprx.config import paper_config
 from eqdeeprx.evaluation import (
     PAPER_FIGURE6A_SINR_POINTS,
+    _model_fingerprint,
     evaluate_paper_figure6a,
     evaluate_uncoded_ber,
 )
 from eqdeeprx.model import EqDeepRx
 from eqdeeprx.signal import OFDMSystem
-from eqdeeprx.training import config_fingerprint
+from eqdeeprx.training import config_fingerprint, formal_checkpoint_errors
 
 from train import tiny_config
 
@@ -45,7 +46,9 @@ def build_arg_parser():
     parser.add_argument("--validation-samples", type=int, default=None)
     parser.add_argument("--samples-per-point", type=int, default=None)
     parser.add_argument("--evaluation-batch-size", type=int, default=2)
-    parser.add_argument("--n-layers", type=int, default=3, choices=(2, 3, 4))
+    parser.add_argument("--microbatch-size", type=int, default=28)
+    parser.add_argument("--generation-batch-size", type=int, default=2)
+    parser.add_argument("--n-layers", type=int, default=4, choices=(2, 3, 4))
     parser.add_argument(
         "--modulation", default=None, choices=("16QAM", "64QAM", "256QAM")
     )
@@ -65,16 +68,42 @@ def main():
     if args.modulation is not None:
         config = config.with_modulation(args.modulation)
     model = EqDeepRx(config).to(args.device)
+    checkpoint_provenance = None
     if args.checkpoint:
         payload = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
         if not args.tiny:
             saved_config = payload.get("config")
-            if (
-                saved_config is None
-                or config_fingerprint(saved_config) != config_fingerprint(config)
-            ):
+            try:
+                config_matches = (
+                    saved_config is not None
+                    and config_fingerprint(saved_config) == config_fingerprint(config)
+                )
+            except (TypeError, ValueError, AttributeError):
+                config_matches = False
+            if not config_matches:
                 raise SystemExit("checkpoint configuration does not match evaluation")
+            contract_errors = formal_checkpoint_errors(
+                payload,
+                model,
+                config,
+                expected_steps=config.training.total_steps,
+                batch_size=config.training.batch_size,
+                microbatch_size=args.microbatch_size,
+                generation_batch_size=args.generation_batch_size,
+                seed=args.seed,
+                expected_amp=True,
+            )
+            if contract_errors:
+                raise SystemExit(
+                    "checkpoint is not a complete formal checkpoint: "
+                    + "; ".join(contract_errors)
+                )
         model.load_state_dict(payload.get("model_state_dict", payload))
+        checkpoint_provenance = {
+            "checkpoint_next_step": payload.get("next_step"),
+            "checkpoint_status": payload.get("checkpoint_status"),
+            "checkpoint_model_fingerprint": _model_fingerprint(model),
+        }
     points = [float(item.strip()) for item in args.sinr_points.split(",") if item.strip()]
     if args.tiny:
         samples_per_point = args.samples_per_point or args.validation_samples or 100
@@ -102,6 +131,7 @@ def main():
             seed=args.seed,
             output_dir=Path(args.output_dir),
             resume=args.resume,
+            checkpoint_provenance=checkpoint_provenance,
         )
     print(json.dumps(metrics, indent=2))
 

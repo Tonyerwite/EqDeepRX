@@ -68,12 +68,39 @@ def test_qam_bits_round_trip_and_ofdm_batch_shapes():
     assert batch.transmitted.shape == (2, 2, 24, 14)
     assert batch.target_bits.shape == (2, 2, 4, 24, 14)
     assert batch.pilot_mask.shape == (2, 2, 24, 14)
-    assert torch.all(batch.data_mask + batch.pilot_mask <= 1.0)
+    assert batch.data_mask.shape == (2, 1, 24, 14)
     pilot_symbols = torch.nonzero(
         batch.pilot_mask.any(dim=(0, 1, 2)), as_tuple=False
     ).flatten()
     assert torch.count_nonzero(batch.data_mask[..., pilot_symbols]) == 0
+    assert torch.count_nonzero(batch.data_mask[..., :]) == 2 * 24 * 12
     assert torch.isfinite(batch.received.real).all()
+
+
+def test_ofdm_noise_power_broadcasts_over_batch_and_rx_dimensions():
+    """A batch size different from the antenna count must remain valid."""
+
+    config = _tiny_config()
+    batch = OFDMSystem(config).generate_batch(
+        batch_size=3,
+        n_layers=2,
+        pilot_count=1,
+        snr_db=torch.tensor([8.0, 12.0, 16.0]),
+        seed=13,
+    )
+    assert batch.received.shape == (3, 2, 24, 14)
+    assert batch.noise_variance.shape == (3,)
+    assert torch.isfinite(batch.received.real).all()
+    interfered = OFDMSystem(config).generate_batch(
+        batch_size=3,
+        n_layers=2,
+        pilot_count=1,
+        snr_db=torch.tensor([8.0, 12.0, 16.0]),
+        seed=13,
+        add_interference=True,
+    )
+    assert interfered.received.shape == (3, 2, 24, 14)
+    assert torch.isfinite(interfered.received.real).all()
 
 
 def test_ofdm_generation_is_deterministic_for_a_seed():
@@ -84,3 +111,70 @@ def test_ofdm_generation_is_deterministic_for_a_seed():
 
     assert torch.equal(first.received, second.received)
     assert torch.equal(first.target_bits, second.target_bits)
+
+
+def test_two_dmrs_symbols_reuse_the_same_qpsk_pilot_sequence():
+    config = _tiny_config()
+    batch = OFDMSystem(config).generate_batch(
+        batch_size=1,
+        n_layers=2,
+        pilot_count=2,
+        snr_db=12.0,
+        seed=12,
+    )
+    symbols = config.receiver.dmrs_symbols[:2]
+    active = batch.pilot_mask[0, :, :, symbols[0]] > 0
+    first = batch.pilot_symbols[0, :, :, symbols[0]]
+    second = batch.pilot_symbols[0, :, :, symbols[1]]
+    assert torch.equal(first[active], second[active])
+
+
+def test_fast_interference_timing_rolls_the_time_axis_only():
+    """Fast and Sionna backends must apply timing offsets along time."""
+
+    waveform = torch.arange(1, 1 + 2 * 3 * 5 * 1, dtype=torch.float32).reshape(
+        2, 3, 5, 1
+    )
+    shifted = OFDMSystem._shift_interference_waveform(
+        waveform, torch.tensor([1, 2])
+    )
+    expected = torch.stack(
+        (
+            torch.roll(waveform[0], shifts=1, dims=1),
+            torch.roll(waveform[1], shifts=2, dims=1),
+        )
+    )
+    assert torch.equal(shifted, expected)
+
+
+def test_fast_interference_timing_modes_have_distinct_offset_contracts():
+    base = _tiny_config()
+    generator = torch.Generator(device="cpu").manual_seed(91)
+    symbol_offsets = OFDMSystem(base)._interference_timing_offsets(
+        batch_size=64, waveform_length=100, generator=generator
+    )
+    assert int(symbol_offsets.min()) >= 0
+    assert int(symbol_offsets.max()) < base.n_fft + base.cyclic_prefix
+
+    zero_config = replace(
+        base,
+        channel=replace(base.channel, interferer_timing="zero"),
+    )
+    zero_offsets = OFDMSystem(zero_config)._interference_timing_offsets(
+        batch_size=8,
+        waveform_length=100,
+        generator=torch.Generator(device="cpu").manual_seed(91),
+    )
+    assert torch.equal(zero_offsets, torch.zeros(8, dtype=torch.long))
+
+    sample_config = replace(
+        base,
+        channel=replace(base.channel, interferer_timing="random_sample"),
+    )
+    sample_offsets = OFDMSystem(sample_config)._interference_timing_offsets(
+        batch_size=64,
+        waveform_length=100,
+        generator=torch.Generator(device="cpu").manual_seed(91),
+    )
+    assert int(sample_offsets.min()) >= 0
+    assert int(sample_offsets.max()) < 100

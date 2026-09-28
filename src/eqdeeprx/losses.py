@@ -158,6 +158,7 @@ def eqdeeprx_loss(
     *,
     snr_linear: torch.Tensor | float = 1.0,
     lambda_symbol: float = 1e-5,
+    symbol_reduction: str = "sum",
 ) -> torch.Tensor:
     """Equation (13), with Eq. (10) LLRs positive for bit zero."""
 
@@ -172,6 +173,8 @@ def eqdeeprx_loss(
     per_element = F.binary_cross_entropy_with_logits(-logits, target_bits.to(logits.device).to(logits.dtype), reduction="none")
     per_sample = (per_element * full_mask).reshape(logits.shape[0], -1).sum(dim=1) / full_mask.reshape(logits.shape[0], -1).sum(dim=1).clamp_min(1.0)
 
+    if symbol_reduction not in {"sum", "mean_active"}:
+        raise ValueError("symbol_reduction must be sum or mean_active")
     symbol_loss = logits.new_zeros(logits.shape[0])
     if symbol_states and target_symbols is not None:
         target = target_symbols.to(logits.device)
@@ -187,9 +190,11 @@ def eqdeeprx_loss(
             prediction = torch.complex(state[:, :, 0], state[:, :, 1])
             error = (prediction - target).abs().square()
             expanded_mask = symbol_mask.expand_as(error)
-            symbol_loss = symbol_loss + (error * expanded_mask).reshape(
-                error.shape[0], -1
-            ).sum(dim=1)
+            contribution = (error * expanded_mask).reshape(error.shape[0], -1).sum(dim=1)
+            if symbol_reduction == "mean_active":
+                active = expanded_mask.reshape(error.shape[0], -1).sum(dim=1)
+                contribution = contribution / active.clamp_min(1.0)
+            symbol_loss = symbol_loss + contribution
 
     weight = torch.as_tensor(snr_linear, device=logits.device, dtype=logits.dtype)
     if weight.dim() == 0:

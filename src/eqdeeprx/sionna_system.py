@@ -9,6 +9,23 @@ from .config import EqDeepRxConfig
 from .signal import SignalBatch, bits_per_symbol, qam_modulate
 
 
+def _fractional_delay_pulse(
+    lags: torch.Tensor,
+    tau: torch.Tensor,
+    bandwidth: float,
+    *,
+    discretization: str = "sinc",
+) -> torch.Tensor:
+    if discretization == "sinc":
+        return torch.sinc(lags - tau.unsqueeze(-1) * float(bandwidth))
+    if discretization == "nearest":
+        nearest = torch.round(tau * float(bandwidth)).clamp(
+            float(lags.min()), float(lags.max())
+        )
+        return (lags == nearest.unsqueeze(-1)).to(tau.dtype)
+    raise ValueError("discretization must be sinc or nearest")
+
+
 def _cir_to_time_channel_efficient(
     bandwidth: float,
     a: torch.Tensor,
@@ -17,6 +34,7 @@ def _cir_to_time_channel_efficient(
     l_max: int,
     *,
     normalize: bool = False,
+    discretization: str = "sinc",
 ) -> torch.Tensor:
     """Sionna-equivalent CIR discretization without a path/time/tap product."""
 
@@ -26,7 +44,9 @@ def _cir_to_time_channel_efficient(
     lags = torch.arange(
         l_min, l_max + 1, dtype=tau.dtype, device=tau.device
     )
-    pulse = torch.sinc(lags - tau.unsqueeze(-1) * float(bandwidth))
+    pulse = _fractional_delay_pulse(
+        lags, tau, bandwidth, discretization=discretization
+    )
     pulse = torch.complex(pulse, torch.zeros_like(pulse))
     taps = torch.einsum("...pt,...pl->...tl", a, pulse)
     if normalize:
@@ -47,6 +67,7 @@ def _apply_cir_time_channel_efficient(
     l_max: int,
     *,
     normalize: bool = False,
+    discretization: str = "sinc",
     time_chunk_size: int = 256,
 ) -> torch.Tensor:
     """Apply a Sionna CIR without materializing the full time/tap response."""
@@ -63,7 +84,9 @@ def _apply_cir_time_channel_efficient(
     lags = torch.arange(
         l_min, l_max + 1, dtype=tau.dtype, device=tau.device
     )
-    pulse = torch.sinc(lags - tau.unsqueeze(-1) * float(bandwidth))
+    pulse = _fractional_delay_pulse(
+        lags, tau, bandwidth, discretization=discretization
+    )
     pulse = torch.complex(pulse, torch.zeros_like(pulse))
     n_output_samples = a.shape[-1]
     l_tot = l_max - l_min + 1
@@ -255,6 +278,8 @@ class SionnaTR38901System:
         pilot_mask = self._pilot_layout(n_layers, pilot_count).unsqueeze(0).expand(
             batch_size, -1, -1, -1
         ).clone()
+        # Match Sionna's KroneckerPilotPattern: selected DMRS symbols are
+        # reserved across the resource grid; pilots are staggered within them.
         pilot_ofdm_symbols = pilot_mask.any(dim=(1, 2))
         data_mask = (~pilot_ofdm_symbols[:, None, None, :]).expand(
             -1, 1, self.config.n_subcarriers, -1
@@ -273,13 +298,16 @@ class SionnaTR38901System:
             device=self.device,
         ).to(torch.float32)
         data_symbols = qam_modulate(bits, self.config.modulation)
+        # KroneckerPilotPattern uses one QPSK sequence per layer and reuses it
+        # on all selected DMRS symbols. Keep that contract for both backends.
         pilot_bits = torch.randint(
             0,
             2,
-            pilot_mask.shape + (2,),
+            pilot_mask.shape[:-1] + (1, 2),
             generator=generator,
             device=self.device,
         ).to(torch.float32)
+        pilot_bits = pilot_bits.expand(*pilot_mask.shape, 2)
         pilot_symbols = qam_modulate(pilot_bits, "QPSK") * pilot_mask
         transmitted = data_symbols * data_mask + pilot_symbols
         target_bits = (
@@ -311,10 +339,18 @@ class SionnaTR38901System:
         channel_model: str,
         speed_mps_range: Tuple[float, float],
         num_time_steps: int,
+        seed: int = 0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         scenario = channel_model.lower()
         model_type = self._UMa if scenario == "uma" else self._UMi
-        cache_key = (scenario, batch_size, n_layers, n_interferers)
+        cache_key = (
+            scenario,
+            batch_size,
+            n_layers,
+            n_interferers,
+            self.config.channel.enable_pathloss,
+            self.config.channel.enable_shadow_fading,
+        )
         channel = self._system_level_channels.get(cache_key)
         if channel is None:
             channel = model_type(
@@ -323,8 +359,8 @@ class SionnaTR38901System:
                 ut_array=self._ut_array,
                 bs_array=self._bs_array,
                 direction="uplink",
-                enable_pathloss=False,
-                enable_shadow_fading=False,
+                enable_pathloss=self.config.channel.enable_pathloss,
+                enable_shadow_fading=self.config.channel.enable_shadow_fading,
                 device=self.sionna_device,
             )
             self._system_level_channels[cache_key] = channel
@@ -338,10 +374,23 @@ class SionnaTR38901System:
             device=self.sionna_device,
         )
         channel.set_topology(*topology)
-        return channel(
+        a, tau = channel(
             num_time_samples=num_time_steps,
             sampling_frequency=self.sample_rate_hz,
         )
+        if self.config.channel.uma_delay_spread_mode == "uniform_10_1100ns":
+            generator = torch.Generator(device=self.device).manual_seed(int(seed) + 17_113)
+            target = torch.empty(batch_size, device=self.device).uniform_(
+                float(self.config.delay_spread_ns_range[0]) * 1e-9,
+                float(self.config.delay_spread_ns_range[1]) * 1e-9,
+                generator=generator,
+            )
+            reduce_dims = tuple(range(1, tau.ndim))
+            minimum = tau.amin(dim=reduce_dims, keepdim=True)
+            span = (tau - minimum).amax(dim=reduce_dims, keepdim=True).clamp_min(1e-12)
+            target_shape = (batch_size,) + (1,) * (tau.ndim - 1)
+            tau = (tau - minimum) * target.reshape(target_shape) / span
+        return a, tau
 
     def _cdl_cir(
         self,
@@ -360,14 +409,19 @@ class SionnaTR38901System:
             links_a = []
             links_tau = []
             for _ in range(n_transmitters):
-                delay_ns = torch.empty((), device=self.device).uniform_(
-                    float(self.config.delay_spread_ns_range[0]),
-                    float(self.config.delay_spread_ns_range[1]),
-                    generator=generator,
-                )
+                if self.config.channel.cdl_delay_spread_mode == "uniform_10_1100ns":
+                    delay_ns = torch.empty(
+                        (), device=self.device
+                    ).uniform_(
+                        float(self.config.delay_spread_ns_range[0]),
+                        float(self.config.delay_spread_ns_range[1]),
+                        generator=generator,
+                    ).item()
+                else:
+                    delay_ns = float(self.config.cdl_delay_spread_ns)
                 channel = self._CDL(
                     model=model_name,
-                    delay_spread=float(delay_ns.item()) * 1e-9,
+                    delay_spread=delay_ns * 1e-9,
                     carrier_frequency=self.config.carrier_frequency_hz,
                     ut_array=self._ut_array,
                     bs_array=self._bs_array,
@@ -404,7 +458,10 @@ class SionnaTR38901System:
             device=self.sionna_device,
         )
         response = self._cir_to_ofdm_channel(
-            frequencies, a_symbols, tau_symbols, normalize=True
+            frequencies,
+            a_symbols,
+            tau_symbols,
+            normalize=self.config.channel.cir_normalization,
         )
         start = (self.config.n_fft - self.config.n_subcarriers) // 2
         response = response[
@@ -510,6 +567,7 @@ class SionnaTR38901System:
                 channel_model=display_model,
                 speed_mps_range=speed_range,
                 num_time_steps=num_channel_steps,
+                seed=seed,
             )
         else:
             a, tau = self._cdl_cir(
@@ -527,13 +585,20 @@ class SionnaTR38901System:
         if add_interference:
             interference_x = x.clone()
             interference_x[:, :n_layers] = 0
+            offset_limit = (
+                self.config.n_fft + self.config.cyclic_prefix
+                if self.config.channel.interferer_timing == "random_symbol"
+                else waveform.shape[-1]
+            )
             offsets = torch.randint(
                 0,
-                self.config.n_fft + self.config.cyclic_prefix,
+                offset_limit,
                 (batch_size,),
                 generator=generator,
                 device=self.device,
             )
+            if self.config.channel.interferer_timing == "zero":
+                offsets = torch.zeros_like(offsets)
             interference_x = self._shift_circular(interference_x, offsets)
             components = torch.stack((desired_x, interference_x), dim=1)
         else:
@@ -545,7 +610,8 @@ class SionnaTR38901System:
             tau,
             self.l_min,
             self.l_max,
-            normalize=True,
+            normalize=self.config.channel.cir_normalization,
+            discretization=self.config.channel.cir_discretization,
         )
         desired_waveform = component_waveforms[:, 0, 0]
         if add_interference:
@@ -556,7 +622,7 @@ class SionnaTR38901System:
         signal_power = desired_waveform.abs().square().mean(
             dim=(1, 2), keepdim=True
         ).clamp_min(1e-30)
-        inr_db = 10.0 + 5.0 * torch.randn(
+        inr_db = self.config.training.inr_mean_db + self.config.training.inr_std_db * torch.randn(
             batch_size, generator=generator, device=self.device
         )
         inr_linear = torch.pow(10.0, inr_db.view(-1, 1, 1) / 10.0)
