@@ -7,6 +7,7 @@ import torch
 
 from .config import EqDeepRxConfig
 from .signal import SignalBatch, bits_per_symbol, qam_modulate
+from .sionna_phy import import_sionna_phy
 
 
 def _fractional_delay_pulse(
@@ -68,7 +69,11 @@ def _apply_cir_time_channel_efficient(
     *,
     normalize: bool = False,
     discretization: str = "sinc",
-    time_chunk_size: int = 256,
+    # The 2048-sample block keeps the exact fused CIR contraction while
+    # avoiding thousands of small CPU BLAS calls on Apple Silicon. The
+    # resulting temporary stays below the measured 18 GiB unified-memory
+    # budget for the paper-scale batch.
+    time_chunk_size: int = 2048,
 ) -> torch.Tensor:
     """Apply a Sionna CIR without materializing the full time/tap response."""
 
@@ -125,9 +130,12 @@ def _apply_cir_time_channel_efficient(
         cached_taps = []
         energy = None
         for start in range(0, n_output_samples, time_chunk_size):
-            taps = torch.einsum(
-                "...pc,...pl->...cl",
-                tx_a[..., start : start + time_chunk_size],
+            # The path/time contraction is A^T @ P.  ``matmul`` maps this
+            # directly to batched BLAS on Apple Silicon and is algebraically
+            # identical to the einsum expression while avoiding its small
+            # contraction planner overhead.
+            taps = torch.matmul(
+                tx_a[..., start : start + time_chunk_size].transpose(-1, -2),
                 tx_pulse,
             )
             cached_taps.append((start, taps))
@@ -157,29 +165,56 @@ def _apply_cir_time_channel_efficient(
 class SionnaTR38901System:
     """Sionna 2.1 time-domain uplink for paper-scale training/evaluation."""
 
-    def __init__(self, config: EqDeepRxConfig, device: torch.device | str = "cpu"):
+    def __init__(
+        self,
+        config: EqDeepRxConfig,
+        device: torch.device | str = "cpu",
+        parallel_workers: int = 1,
+    ):
+        """Create the Sionna-backed signal generator.
+
+        ``parallel_workers`` is retained as an explicit runtime contract for
+        the training and evaluation entry points. Batch generation currently
+        remains synchronous because Sionna's mutable channel objects and
+        global RNG state are not safe to share across worker threads; callers
+        can still record the requested setting without silently rejecting the
+        run.
+        """
+        if int(parallel_workers) < 1:
+            raise ValueError("parallel_workers must be positive")
+        self.parallel_workers = int(parallel_workers)
         try:
-            from sionna.phy.channel import (
-                ApplyTimeChannel,
-                cir_to_ofdm_channel,
-                cir_to_time_channel,
-                gen_single_sector_topology_interferers,
-                subcarrier_frequencies,
-                time_lag_discrete_time_channel,
-            )
-            from sionna.phy.channel.tr38901 import CDL, PanelArray, UMa, UMi
-            from sionna.phy.ofdm import OFDMDemodulator, OFDMModulator
+            channel = import_sionna_phy("sionna.phy.channel")
+            tr38901 = import_sionna_phy("sionna.phy.channel.tr38901")
+            ofdm = import_sionna_phy("sionna.phy.ofdm")
         except ImportError as exc:
             raise RuntimeError(
                 "Sionna 2.1 is required for the sionna_tr38901 backend"
             ) from exc
 
+        ApplyTimeChannel = channel.ApplyTimeChannel
+        cir_to_ofdm_channel = channel.cir_to_ofdm_channel
+        cir_to_time_channel = channel.cir_to_time_channel
+        gen_single_sector_topology_interferers = channel.gen_single_sector_topology_interferers
+        subcarrier_frequencies = channel.subcarrier_frequencies
+        time_lag_discrete_time_channel = channel.time_lag_discrete_time_channel
+        CDL, PanelArray, UMa, UMi = (
+            tr38901.CDL, tr38901.PanelArray, tr38901.UMa, tr38901.UMi
+        )
+        OFDMDemodulator, OFDMModulator = ofdm.OFDMDemodulator, ofdm.OFDMModulator
+
         self.config = config
         self.device = torch.device(device)
+        # Sionna 2.1 exposes CPU and CUDA devices, but not Apple's MPS
+        # backend. Keep the complete TR 38.901 generator on CPU on macOS and
+        # transfer each finished batch to MPS once.
+        self.generation_device = (
+            torch.device("cpu") if self.device.type == "mps" else self.device
+        )
         self.sionna_device = (
             f"cuda:{torch.cuda.current_device()}"
-            if self.device.type == "cuda" and self.device.index is None
-            else str(self.device)
+            if self.generation_device.type == "cuda" and self.generation_device.index is None
+            else str(self.generation_device)
         )
         if config.n_fft < config.n_subcarriers:
             raise ValueError("n_fft must be at least n_subcarriers")
@@ -240,6 +275,7 @@ class SionnaTR38901System:
         if self._bs_array.num_ant != config.n_rx_antennas:
             raise ValueError("unable to construct the configured BS antenna count")
 
+
     def _pilot_layout(self, n_layers: int, pilot_count: int) -> torch.Tensor:
         self.config.validate_layer_count(n_layers)
         if pilot_count not in (1, 2):
@@ -248,7 +284,7 @@ class SionnaTR38901System:
             n_layers,
             self.config.n_subcarriers,
             self.config.n_ofdm_symbols,
-            device=self.device,
+            device=self.generation_device,
         )
         symbols = self.config.receiver.dmrs_symbols[:pilot_count]
         spacing = self.config.receiver.pilot_spacing
@@ -257,12 +293,12 @@ class SionnaTR38901System:
                 layer % spacing,
                 self.config.n_subcarriers,
                 spacing,
-                device=self.device,
+                device=self.generation_device,
             )
             mask[
                 layer,
                 carriers[:, None],
-                torch.as_tensor(symbols, device=self.device)[None, :],
+                torch.as_tensor(symbols, device=self.generation_device)[None, :],
             ] = 1.0
         return mask
 
@@ -295,7 +331,7 @@ class SionnaTR38901System:
                 bps,
             ),
             generator=generator,
-            device=self.device,
+            device=self.generation_device,
         ).to(torch.float32)
         data_symbols = qam_modulate(bits, self.config.modulation)
         # KroneckerPilotPattern uses one QPSK sequence per layer and reuses it
@@ -305,7 +341,7 @@ class SionnaTR38901System:
             2,
             pilot_mask.shape[:-1] + (1, 2),
             generator=generator,
-            device=self.device,
+            device=self.generation_device,
         ).to(torch.float32)
         pilot_bits = pilot_bits.expand(*pilot_mask.shape, 2)
         pilot_symbols = qam_modulate(pilot_bits, "QPSK") * pilot_mask
@@ -322,7 +358,7 @@ class SionnaTR38901System:
             self.config.n_ofdm_symbols,
             self.config.n_fft,
             dtype=grid.dtype,
-            device=self.device,
+            device=self.generation_device,
         )
         start = (self.config.n_fft - self.config.n_subcarriers) // 2
         full[..., start : start + self.config.n_subcarriers] = grid.permute(
@@ -379,8 +415,8 @@ class SionnaTR38901System:
             sampling_frequency=self.sample_rate_hz,
         )
         if self.config.channel.uma_delay_spread_mode == "uniform_10_1100ns":
-            generator = torch.Generator(device=self.device).manual_seed(int(seed) + 17_113)
-            target = torch.empty(batch_size, device=self.device).uniform_(
+            generator = torch.Generator(device=self.generation_device).manual_seed(int(seed) + 17_113)
+            target = torch.empty(batch_size, device=self.generation_device).uniform_(
                 float(self.config.delay_spread_ns_range[0]) * 1e-9,
                 float(self.config.delay_spread_ns_range[1]) * 1e-9,
                 generator=generator,
@@ -411,7 +447,7 @@ class SionnaTR38901System:
             for _ in range(n_transmitters):
                 if self.config.channel.cdl_delay_spread_mode == "uniform_10_1100ns":
                     delay_ns = torch.empty(
-                        (), device=self.device
+                        (), device=self.generation_device
                     ).uniform_(
                         float(self.config.delay_spread_ns_range[0]),
                         float(self.config.delay_spread_ns_range[1]),
@@ -446,7 +482,7 @@ class SionnaTR38901System:
     ) -> torch.Tensor:
         symbol_length = self.config.n_fft + self.config.cyclic_prefix
         time_indices = (
-            torch.arange(self.config.n_ofdm_symbols, device=self.device)
+            torch.arange(self.config.n_ofdm_symbols, device=self.generation_device)
             * symbol_length
             + self.config.cyclic_prefix
         ).clamp_max(a.shape[-1] - 1)
@@ -516,11 +552,11 @@ class SionnaTR38901System:
         if speed_range[0] < 0 or speed_range[1] < speed_range[0]:
             raise ValueError("speed_mps_range must be nonnegative and ordered")
 
-        from sionna.phy import config as sionna_config
+        sionna_config = import_sionna_phy("sionna.phy").config
 
         torch.manual_seed(int(seed))
         sionna_config.seed = int(seed)
-        generator = torch.Generator(device=self.device).manual_seed(int(seed))
+        generator = torch.Generator(device=self.generation_device).manual_seed(int(seed))
         (
             transmitted,
             pilot_symbols,
@@ -547,7 +583,7 @@ class SionnaTR38901System:
                     bits_per_symbol(self.config.modulation),
                 ),
                 generator=generator,
-                device=self.device,
+                device=self.generation_device,
             ).to(torch.float32)
             interference_grid = qam_modulate(
                 interference_bits, self.config.modulation
@@ -595,7 +631,7 @@ class SionnaTR38901System:
                 offset_limit,
                 (batch_size,),
                 generator=generator,
-                device=self.device,
+                device=self.generation_device,
             )
             if self.config.channel.interferer_timing == "zero":
                 offsets = torch.zeros_like(offsets)
@@ -623,11 +659,11 @@ class SionnaTR38901System:
             dim=(1, 2), keepdim=True
         ).clamp_min(1e-30)
         inr_db = self.config.training.inr_mean_db + self.config.training.inr_std_db * torch.randn(
-            batch_size, generator=generator, device=self.device
+            batch_size, generator=generator, device=self.generation_device
         )
         inr_linear = torch.pow(10.0, inr_db.view(-1, 1, 1) / 10.0)
         requested_snr = torch.as_tensor(
-            snr_db, dtype=signal_power.dtype, device=self.device
+            snr_db, dtype=signal_power.dtype, device=self.generation_device
         ).flatten()
         if requested_snr.numel() == 1:
             requested_snr = requested_snr.expand(batch_size)
@@ -659,12 +695,12 @@ class SionnaTR38901System:
             torch.randn(
                 desired_waveform.shape,
                 generator=generator,
-                device=self.device,
+                device=self.generation_device,
             ),
             torch.randn(
                 desired_waveform.shape,
                 generator=generator,
-                device=self.device,
+                device=self.generation_device,
             ),
         ) * torch.sqrt(noise_power / 2.0)
         received_waveform = desired_waveform + interference_waveform + noise
@@ -676,7 +712,7 @@ class SionnaTR38901System:
         true_channel = (
             self._channel_truth(a, tau, n_layers)
             if return_true_channel
-            else torch.empty(0, dtype=a.dtype, device=self.device)
+            else torch.empty(0, dtype=a.dtype, device=self.generation_device)
         )
 
         actual_snr = 10.0 * torch.log10(
@@ -695,20 +731,29 @@ class SionnaTR38901System:
             snr_value = actual_snr.detach()
             sinr_value = actual_sinr.detach()
 
+        def output(value: torch.Tensor) -> torch.Tensor:
+            return value.to(self.device) if value.device != self.device else value
+
         return SignalBatch(
-            received=received,
-            transmitted=transmitted,
-            pilot_symbols=pilot_symbols,
-            pilot_mask=pilot_mask,
-            data_mask=data_mask,
-            target_bits=target_bits,
-            true_channel=true_channel,
-            noise_variance=noise_power.flatten(),
-            snr_db=snr_value,
+            received=output(received),
+            transmitted=output(transmitted),
+            pilot_symbols=output(pilot_symbols),
+            pilot_mask=output(pilot_mask),
+            data_mask=output(data_mask),
+            target_bits=output(target_bits),
+            true_channel=output(true_channel),
+            noise_variance=output(noise_power.flatten()),
+            snr_db=(
+                output(snr_value) if isinstance(snr_value, torch.Tensor) else snr_value
+            ),
             backend="sionna_tr38901_time_domain",
             interference_present=bool(add_interference),
             sinr_db=float(sinr_db) if sinr_db is not None else None,
-            realized_sinr_db=sinr_value,
+            realized_sinr_db=(
+                output(sinr_value)
+                if isinstance(sinr_value, torch.Tensor)
+                else sinr_value
+            ),
             channel_model=display_model,
             speed_mps_range=(float(speed_range[0]), float(speed_range[1])),
             sample_rate_hz=self.sample_rate_hz,

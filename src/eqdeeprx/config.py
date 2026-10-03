@@ -31,7 +31,7 @@ class ModelConfig:
     denoise_widths: Tuple[int, ...] = (64, 64, 64, 2)
     denoise_subsamples: Tuple[int, ...] = (1, 4, 2, 1)
     # Section III leaves the mixed-channel subset C_s qualitative; keep the
-    # selected baseline explicit so sensitivity runs can vary one choice.
+    # selected paper-aligned baseline explicit.
     time_mixer_channels: int = 2
     detector_channels: int = 64
     detector_sections: int = 4
@@ -57,6 +57,17 @@ class TrainingConfig:
     lamb_eps: float = 1e-6
     symbol_loss_weight: float = 1e-5
     layer_counts: Tuple[int, ...] = (2, 3, 4)
+    # The paper requires coverage of all three layer counts but does not
+    # publish their sampling probabilities; use the uniform baseline.
+    layer_sampling_probabilities: Tuple[float, ...] = (
+        1.0 / 3.0,
+        1.0 / 3.0,
+        1.0 / 3.0,
+    )
+    # Probability of selecting the two-DMRS configuration when the training
+    # step does not pin a pilot count. The paper publishes both configurations,
+    # not their mixture ratio.
+    pilot_sampling_probability_two: float = 0.5
     interference_probability: float = 0.5
     # Table II publishes the lognormal INR location and spread. Keep them
     # explicit so both backends and the fidelity manifest use one source.
@@ -139,14 +150,51 @@ class EqDeepRxConfig:
         """
 
         default_layers = TrainingConfig().layer_counts
+        default_layer_probabilities = TrainingConfig().layer_sampling_probabilities
         top_layers_changed = self.layer_counts != default_layers
         training_layers_changed = self.training.layer_counts != default_layers
         if top_layers_changed and training_layers_changed and self.layer_counts != self.training.layer_counts:
             raise ValueError("layer_counts and training.layer_counts disagree")
         if top_layers_changed and not training_layers_changed:
-            object.__setattr__(self, "training", replace(self.training, layer_counts=self.layer_counts))
+            probabilities = self.training.layer_sampling_probabilities
+            if probabilities == default_layer_probabilities:
+                probabilities = tuple(1.0 / len(self.layer_counts) for _ in self.layer_counts)
+            object.__setattr__(
+                self,
+                "training",
+                replace(
+                    self.training,
+                    layer_counts=self.layer_counts,
+                    layer_sampling_probabilities=probabilities,
+                ),
+            )
         elif training_layers_changed and not top_layers_changed:
             object.__setattr__(self, "layer_counts", self.training.layer_counts)
+            if self.training.layer_sampling_probabilities == default_layer_probabilities:
+                object.__setattr__(
+                    self,
+                    "training",
+                    replace(
+                        self.training,
+                        layer_sampling_probabilities=tuple(
+                            1.0 / len(self.training.layer_counts)
+                            for _ in self.training.layer_counts
+                        ),
+                    ),
+                )
+        elif top_layers_changed and training_layers_changed:
+            if self.training.layer_sampling_probabilities == default_layer_probabilities:
+                object.__setattr__(
+                    self,
+                    "training",
+                    replace(
+                        self.training,
+                        layer_sampling_probabilities=tuple(
+                            1.0 / len(self.training.layer_counts)
+                            for _ in self.training.layer_counts
+                        ),
+                    ),
+                )
 
         default_probability = TrainingConfig().interference_probability
         top_probability_changed = self.interference_probability != default_probability
@@ -173,12 +221,29 @@ class EqDeepRxConfig:
             raise ValueError("amp_dtype must be bfloat16 or float32")
         if self.training.vcl_attachment not in {"all", "final", "none"}:
             raise ValueError("vcl_attachment must be all, final, or none")
+        if not self.training.layer_counts:
+            raise ValueError("layer_counts must not be empty")
+        if len(self.training.layer_sampling_probabilities) != len(self.training.layer_counts):
+            raise ValueError(
+                "layer_sampling_probabilities must match layer_counts length"
+            )
+        if any(
+            not 0.0 < float(value) <= 1.0
+            for value in self.training.layer_sampling_probabilities
+        ):
+            raise ValueError("layer sampling probabilities must be finite and positive")
+        if abs(sum(float(value) for value in self.training.layer_sampling_probabilities) - 1.0) > 1e-6:
+            raise ValueError("layer sampling probabilities must sum to one")
+        if not 0.0 <= self.training.pilot_sampling_probability_two <= 1.0:
+            raise ValueError("pilot_sampling_probability_two must be between 0 and 1")
         if self.training.symbol_loss_reduction not in {"sum", "mean_active"}:
             raise ValueError("unsupported symbol-loss reduction")
         if self.model.time_mixer_channels < 1:
             raise ValueError("time_mixer_channels must be positive")
         if self.training.inr_std_db < 0:
             raise ValueError("inr_std_db must be nonnegative")
+        if not 0.0 <= self.training.interference_probability <= 1.0:
+            raise ValueError("interference_probability must be between 0 and 1")
         if self.cdl_delay_spread_ns <= 0:
             raise ValueError("cdl_delay_spread_ns must be positive")
         if self.ue_tx_antennas != 1:

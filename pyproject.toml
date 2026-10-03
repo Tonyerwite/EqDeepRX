@@ -14,7 +14,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
 standard = ["sionna==2.1.0"]
 
 [tool.setuptools.packages.find]
@@ -22,7 +21,3 @@ where = ["src"]
 
 [tool.setuptools]
 py-modules = ["eqdeeprx_runtime"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]

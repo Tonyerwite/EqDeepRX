@@ -35,8 +35,8 @@ def _default_runtime_root() -> Path:
 def configure_runtime_storage(root: str | os.PathLike[str] | None = None) -> Path:
     """Route Python, PyTorch, CUDA, Triton and plotting caches to ``root``.
 
-    The explicit ``root`` argument is used by tests and callers that manage
-    their own run volume.  Otherwise ``EQDEEP_RX_RUNTIME_DIR`` is honored,
+    The explicit ``root`` argument is used by callers that manage their own
+    run volume. Otherwise ``EQDEEP_RX_RUNTIME_DIR`` is honored,
     falling back to the D: run volume on Windows when it is available.
     """
 
@@ -47,4 +47,3 @@ def configure_runtime_storage(root: str | os.PathLike[str] | None = None) -> Pat
         path.mkdir(parents=True, exist_ok=True)
         os.environ[variable] = str(path)
     return runtime_root
-

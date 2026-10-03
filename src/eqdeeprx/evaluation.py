@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import random
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
 
@@ -62,6 +63,29 @@ def _baseline_logits(batch, config: EqDeepRxConfig, *, known_channel: bool) -> t
         )
         llrs.append(llr.permute(1, 0, 2, 3))
     return torch.stack(llrs, dim=1)
+
+
+def _batch_to_device(batch, device: torch.device | str):
+    """Move generated signal data to the model device at the evaluation boundary."""
+
+    target = torch.device(device)
+
+    def move(value):
+        return value.to(target) if isinstance(value, torch.Tensor) else value
+
+    return replace(
+        batch,
+        received=move(batch.received),
+        transmitted=move(batch.transmitted),
+        pilot_symbols=move(batch.pilot_symbols),
+        pilot_mask=move(batch.pilot_mask),
+        data_mask=move(batch.data_mask),
+        target_bits=move(batch.target_bits),
+        true_channel=move(batch.true_channel),
+        noise_variance=move(batch.noise_variance),
+        snr_db=move(batch.snr_db),
+        realized_sinr_db=move(batch.realized_sinr_db),
+    )
 
 
 def _model_ber(model, batch, config: EqDeepRxConfig, bit_mask: torch.Tensor) -> float:
@@ -174,6 +198,7 @@ def evaluate_uncoded_ber(
                 lmmse_values = []
                 for sample in range(samples_per_point):
                     batch = system.generate_batch(batch_size=1, n_layers=n_layers, pilot_count=pilot_count, snr_db=snr, seed=seed + snr_index * 100_000 + sample)
+                    batch = _batch_to_device(batch, next(model.parameters()).device)
                     eq_values.append(_model_ber(model, batch, config, bit_mask))
                     practical_logits = _baseline_logits(batch, config, known_channel=False)
                     lmmse_values.append(compute_ber(practical_logits, batch.target_bits, batch.data_mask, bit_mask))
@@ -271,6 +296,7 @@ def evaluate_paper_figure6a(
         "seed": seed,
         "modulation": config.modulation,
         "channel_model": config.evaluation.channel_model,
+        "interferer_timing": config.channel.interferer_timing,
         "cdl_delay_spread_mode": config.channel.cdl_delay_spread_mode,
         "cdl_delay_spread_ns": config.cdl_delay_spread_ns,
         "validation_delay_spread_ns_range": list(config.delay_spread_ns_range),
@@ -326,6 +352,7 @@ def evaluate_paper_figure6a(
                     channel_model=config.evaluation.channel_model,
                     speed_mps_range=config.evaluation.speed_mps_range,
                 )
+                batch = _batch_to_device(batch, next(model.parameters()).device)
                 if batch.backend != "sionna_tr38901_time_domain":
                     raise RuntimeError(
                         "Figure 6(a) evaluation requires the Sionna time-domain backend"
@@ -390,6 +417,7 @@ def evaluate_paper_figure6a(
         "paper_figure6a_protocol": True,
         "bit_identical_to_authors_private_run": False,
         "channel_model": config.evaluation.channel_model,
+        "interferer_timing": config.channel.interferer_timing,
         "speed_mps_range": list(config.evaluation.speed_mps_range),
         "interfering_ues": config.evaluation.interfering_ues,
         "sinr_db": sinr_centers,
@@ -405,8 +433,8 @@ def evaluate_paper_figure6a(
             for pilot in pilot_counts
         },
         # Keep pooled numerators/denominators alongside the plotted ratios.
-        # Exploratory sensitivity comparisons must not give every sparsely
-        # populated bin the same weight or infer a value from an empty bin.
+        # Sparse bins must not receive the same weight or infer a value from
+        # an empty bin.
         "curve_error_counts": progress["errors"],
         "curve_bit_counts": progress["bits"],
         "in_range_sample_count_by_pilot": progress["in_range_sample_count"],

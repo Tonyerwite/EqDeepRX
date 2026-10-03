@@ -31,6 +31,14 @@ from eqdeeprx.training import config_fingerprint, formal_checkpoint_errors
 from train import tiny_config
 
 
+def default_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="Evaluate EqDeepRx and LMMSE uncoded BER.")
     parser.add_argument("--checkpoint", default="")
@@ -53,7 +61,7 @@ def build_arg_parser():
         "--modulation", default=None, choices=("16QAM", "64QAM", "256QAM")
     )
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--device", default=default_device())
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--tiny", action="store_true")
     return parser
@@ -91,7 +99,11 @@ def main():
                 microbatch_size=args.microbatch_size,
                 generation_batch_size=args.generation_batch_size,
                 seed=args.seed,
-                expected_amp=True,
+                expected_amp=(
+                    torch.device(args.device).type == "cuda"
+                    and config.training.amp_dtype != "float32"
+                ),
+                expected_device=args.device,
             )
             if contract_errors:
                 raise SystemExit(
@@ -122,7 +134,10 @@ def main():
 
         metrics = evaluate_paper_figure6a(
             model,
-            SionnaTR38901System(config, device=args.device),
+            SionnaTR38901System(
+                config,
+                device=("cpu" if torch.device(args.device).type == "mps" else args.device),
+            ),
             config,
             sinr_points=points,
             validation_samples=args.validation_samples,

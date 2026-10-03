@@ -273,7 +273,7 @@ def _solve_equalizer(
     eye_t = torch.eye(nt, dtype=channel.dtype, device=channel.device).view(1, 1, 1, nt, nt)
     if covariance is None:
         gram = h.conj().transpose(-1, -2) @ h + alpha * eye_t
-        weights = torch.linalg.solve(gram, h.conj().transpose(-1, -2))
+        weights = _complex_solve(gram, h.conj().transpose(-1, -2))
         disturbance_variance = None
     else:
         bands = covariance.shape[-1]
@@ -282,13 +282,13 @@ def _solve_equalizer(
         eye_r = torch.eye(
             nr, dtype=channel.dtype, device=channel.device
         ).expand(n, bands, nr, nr)
-        r_inverse = torch.linalg.solve(r_by_band, eye_r)
+        r_inverse = _complex_solve(r_by_band, eye_r)
         r_inverse = r_inverse[:, band_indices]
         h_hermitian_r_inverse = (
             h.conj().transpose(-1, -2) @ r_inverse.unsqueeze(2)
         )
         gram = h_hermitian_r_inverse @ h + eye_t
-        weights = torch.linalg.solve(gram, h_hermitian_r_inverse)
+        weights = _complex_solve(gram, h_hermitian_r_inverse)
         r = r_by_band[:, band_indices]
         post_covariance = (
             weights
@@ -309,6 +309,24 @@ def _solve_equalizer(
         )
         disturbance_variance = disturbance_variance.permute(0, 3, 1, 2).contiguous()
     return equalized, disturbance_variance
+
+
+def _complex_solve(matrix: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+    """Solve a complex system via real blocks on MPS, which lacks complex LU."""
+
+    if matrix.device.type != "mps":
+        return torch.linalg.solve(matrix, rhs)
+    real, imag = matrix.real, matrix.imag
+    blocks = torch.cat(
+        (
+            torch.cat((real, -imag), dim=-1),
+            torch.cat((imag, real), dim=-1),
+        ),
+        dim=-2,
+    )
+    solution = torch.linalg.solve(blocks, torch.cat((rhs.real, rhs.imag), dim=-2))
+    dimension = matrix.shape[-1]
+    return torch.complex(solution[..., :dimension, :], solution[..., dimension:, :])
 
 
 def rzf_equalize(received: torch.Tensor, channel: torch.Tensor, *, alpha: float = 1e-4) -> torch.Tensor:

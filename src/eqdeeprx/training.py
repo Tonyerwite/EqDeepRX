@@ -21,7 +21,12 @@ from .losses import (
 from .signal import OFDMSystem, SignalBatch, bits_per_symbol
 
 
+# These are operational sanity bounds, not paper settings. The original
+# Windows/CUDA workflow fit inside eight days; an Apple-silicon MPS run keeps
+# the same effective batch and can take materially longer because Sionna's
+# time-domain generator remains CPU-bound.
 MAX_LONG_TRAINING_DAYS = 8.0
+MAX_MPS_TRAINING_DAYS = 60.0
 AMP_INITIAL_SCALE = 1.0
 CHECKPOINT_SCHEMA_VERSION = 1
 CHECKPOINT_STATUS_COMPLETE = "complete"
@@ -78,9 +83,11 @@ def validate_full_training_request(
     batch_size: int,
     microbatch_size: int,
     generation_batch_size: int | None = None,
+    sionna_workers: int | None = None,
     device: torch.device | str,
     confirm: bool,
     cuda_available: bool,
+    mps_available: bool | None = None,
     preflight_report: Path,
     n_layers: int | None = None,
     pilot_count: int | None = None,
@@ -100,8 +107,20 @@ def validate_full_training_request(
         raise RuntimeError("full training must sample the paper SNR distribution")
     if config.training.backend != "sionna_tr38901":
         raise RuntimeError("full training requires the sionna_tr38901 backend")
-    if torch.device(device).type != "cuda" or not cuda_available:
-        raise RuntimeError("full training requires an available CUDA device")
+    requested_device = torch.device(device)
+    if requested_device.type == "cuda":
+        if not cuda_available:
+            raise RuntimeError("full training requires an available CUDA device")
+    elif requested_device.type == "mps":
+        available = (
+            torch.backends.mps.is_available()
+            if mps_available is None
+            else bool(mps_available)
+        )
+        if not available:
+            raise RuntimeError("full training requires an available MPS device")
+    else:
+        raise RuntimeError("full training requires CUDA or Apple MPS")
     if steps != config.training.total_steps:
         raise RuntimeError(
             f"full training requires exactly {config.training.total_steps} steps"
@@ -123,6 +142,8 @@ def validate_full_training_request(
         or microbatch_size % generation_batch_size
     ):
         raise RuntimeError("full training generation batch size is invalid")
+    if sionna_workers is not None and sionna_workers < 1:
+        raise RuntimeError("full training Sionna worker count is invalid")
     path = Path(preflight_report)
     if not path.is_file():
         raise RuntimeError("full training requires a standard preflight report")
@@ -137,13 +158,27 @@ def validate_full_training_request(
         raise RuntimeError(
             "full training generation batch size was not approved by preflight"
         )
+    if sionna_workers is not None and report.get("sionna_workers") != sionna_workers:
+        raise RuntimeError("full training Sionna worker count was not approved by preflight")
     runtime_days = report.get("estimated_total_training_days")
+    runtime_limit = (
+        MAX_MPS_TRAINING_DAYS
+        if requested_device.type == "mps"
+        else MAX_LONG_TRAINING_DAYS
+    )
     if (
         not isinstance(runtime_days, (int, float))
         or not math.isfinite(runtime_days)
-        or runtime_days > MAX_LONG_TRAINING_DAYS
+        or runtime_days > runtime_limit
     ):
-        raise RuntimeError("standard preflight exceeds the eight-day runtime budget")
+        limit_label = (
+            "eight-day runtime budget"
+            if requested_device.type == "cuda"
+            else f"{runtime_limit:g}-day runtime budget"
+        )
+        raise RuntimeError(
+            f"standard preflight exceeds the {limit_label}"
+        )
 
 
 class Lamb(torch.optim.Optimizer):
@@ -376,6 +411,7 @@ def _checkpoint_consistency_errors(
     expected_config: EqDeepRxConfig,
     expected_signature: Dict[str, Any],
     expected_amp: bool,
+    expected_device: torch.device | str | None = None,
 ) -> list[str]:
     """Validate a resume payload before loading any mutable state."""
 
@@ -534,6 +570,12 @@ def _checkpoint_consistency_errors(
             errors.append("torch RNG state is missing")
         if expected_amp and "cuda_rng_state_all" not in checkpoint:
             errors.append("CUDA RNG state is missing")
+        if (
+            expected_device is not None
+            and torch.device(expected_device).type == "mps"
+            and "mps_rng_state" not in checkpoint
+        ):
+            errors.append("MPS RNG state is missing")
     return errors
 
 
@@ -548,6 +590,7 @@ def formal_checkpoint_errors(
     generation_batch_size: int,
     seed: int,
     expected_amp: bool,
+    expected_device: torch.device | str | None = None,
 ) -> list[str]:
     """Return contract failures for a checkpoint eligible for formal results."""
 
@@ -586,6 +629,7 @@ def formal_checkpoint_errors(
             expected_config=config,
             expected_signature=expected_signature,
             expected_amp=expected_amp,
+            expected_device=expected_device,
         )
     )
     return errors
@@ -598,6 +642,8 @@ def _capture_rng_state() -> Dict[str, Any]:
     }
     if torch.cuda.is_available():
         state["cuda_rng_state_all"] = [item.clone() for item in torch.cuda.get_rng_state_all()]
+    if hasattr(torch, "mps") and torch.backends.mps.is_available():
+        state["mps_rng_state"] = torch.mps.get_rng_state().clone()
     return state
 
 
@@ -610,6 +656,12 @@ def _restore_rng_state(payload: Dict[str, Any], random_state: random.Random) -> 
         torch.cuda.set_rng_state_all(
             [item.to(device="cpu") for item in payload["cuda_rng_state_all"]]
         )
+    if (
+        payload.get("mps_rng_state") is not None
+        and hasattr(torch, "mps")
+        and torch.backends.mps.is_available()
+    ):
+        torch.mps.set_rng_state(payload["mps_rng_state"].cpu())
 
 
 def _runtime_state_errors(
@@ -861,6 +913,11 @@ def train_steps(
         "losses": [],
         "bers": [],
         "learning_rates": [],
+        "training_case_step_counts": {
+            f"{layers}:{pilots}:{int(interference)}": 0
+            for layers, pilots, interference in paper_training_configurations(config)
+        },
+        "training_case_counts_complete": False,
         "effective_batch_size": batch_size,
         "microbatch_size": microbatch_size,
         "generation_batch_size": generation_batch_size,
@@ -876,6 +933,7 @@ def train_steps(
             expected_config=config,
             expected_signature=run_signature,
             expected_amp=amp_enabled,
+            expected_device=device,
         )
         if consistency_errors:
             raise ValueError(
@@ -892,8 +950,16 @@ def train_steps(
         history["microbatch_size"] = microbatch_size
         history["generation_batch_size"] = generation_batch_size
         history["amp_enabled"] = amp_enabled
-        scaler.load_state_dict(checkpoint["grad_scaler_state_dict"])
         start_step = int(checkpoint["next_step"])
+        if "training_case_step_counts" not in history:
+            history["training_case_step_counts"] = {
+                f"{layers}:{pilots}:{int(interference)}": 0
+                for layers, pilots, interference in paper_training_configurations(config)
+            }
+            history["training_case_counts_complete"] = start_step == 0
+        else:
+            history.setdefault("training_case_counts_complete", False)
+        scaler.load_state_dict(checkpoint["grad_scaler_state_dict"])
         _restore_rng_state(checkpoint, random_state)
     bit_mask = _bit_mask(config, device)
     for step in range(start_step, steps):
@@ -916,9 +982,31 @@ def train_steps(
                 f"non-finite training state at step {step}: {', '.join(diagnostics)}"
             )
 
-        current_layers = n_layers if n_layers is not None else random_state.choice(config.layer_counts)
+        if n_layers is not None:
+            current_layers = n_layers
+        elif all(
+            probability == 1.0 / len(config.layer_counts)
+            for probability in config.training.layer_sampling_probabilities
+        ):
+            current_layers = random_state.choice(config.layer_counts)
+        else:
+            current_layers = random_state.choices(
+                config.layer_counts,
+                weights=config.training.layer_sampling_probabilities,
+                k=1,
+            )[0]
         config.validate_layer_count(current_layers)
-        current_pilot_count = pilot_count if pilot_count is not None else random_state.choice((1, 2))
+        if pilot_count is not None:
+            current_pilot_count = pilot_count
+        elif config.training.pilot_sampling_probability_two == 0.5:
+            current_pilot_count = random_state.choice((1, 2))
+        else:
+            current_pilot_count = (
+                2
+                if random_state.random()
+                < config.training.pilot_sampling_probability_two
+                else 1
+            )
         add_interference = random_state.random() < config.interference_probability
         batches = []
         batch_parts = []
@@ -1066,21 +1154,29 @@ def train_steps(
         history["losses"].append(step_loss)
         history["bers"].append(step_ber)
         history["learning_rates"].append(float(lr))
+        case_key = f"{current_layers}:{current_pilot_count}:{int(add_interference)}"
+        history["training_case_step_counts"][case_key] += 1
+        history["training_case_counts_complete"] = all(
+            count > 0 for count in history["training_case_step_counts"].values()
+        )
         history["steps"] = proposed_step
         rng = _capture_rng_state()
         rng["python_random_state"] = random_state.getstate()
         payload = {
             "checkpoint_status": CHECKPOINT_STATUS_COMPLETE,
             "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "history": history,
+            # Serialize a CPU snapshot so an interruption during MPS/CUDA
+            # execution cannot leave device-backed tensors half-written and
+            # the checkpoint can be audited or resumed on another device.
+            "model_state_dict": _copy_to_cpu(model.state_dict()),
+            "optimizer_state_dict": _copy_to_cpu(optimizer.state_dict()),
+            "history": _copy_to_cpu(history),
             "config": config,
             "steps": history["steps"],
             "next_step": proposed_step,
             "amp_enabled": amp_enabled,
-            "grad_scaler_state_dict": scaler.state_dict(),
-            "run_signature": run_signature,
+            "grad_scaler_state_dict": _copy_to_cpu(scaler.state_dict()),
+            "run_signature": copy.deepcopy(run_signature),
             **rng,
         }
         if output_path is not None and (
