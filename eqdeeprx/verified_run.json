@@ -1,0 +1,336 @@
+{
+  "long_training_ready": true,
+  "performance_reproduced": false,
+  "readiness_scope": "Implementation/configuration checks, synchronized updates/resume, and successful full-batch GPU execution. Final Figure 6(a) BER is pending 70000-step training.",
+  "evidence_origin": "Reused completed current-source 120-step Cs=2 uniform probe; no preflight training was repeated at handoff.",
+  "created_utc": "2026-10-14T10:29:09.352038+00:00",
+  "config_fingerprint": "99bdc40b75bd16bac00b4c5e5dee4fbcacf1c94c792417638a13c7fba1696148",
+  "source_fingerprint": "4392793f7ab928b8d1c04b0ae9deb085a6c846e66c8ad6c5ce9b012f7c30bf01",
+  "torch_version": "2.11.0+cu128",
+  "sionna_version": "2.1.0",
+  "cuda_allocator_config": "max_split_size_mb:256",
+  "cuda_memory_fraction": 0.85,
+  "cublas_workspace_config": ":4096:8",
+  "deterministic_algorithms": true,
+  "gpu_name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+  "gpu_total_bytes": 8518041600,
+  "effective_batch_size": 112,
+  "approved_microbatch_size": 56,
+  "approved_generation_batch_size": 2,
+  "sionna_workers": 1,
+  "measured_mean_optimizer_step_seconds": 9.54284196584858,
+  "observed_mean_optimizer_step_seconds": 9.5235745907566,
+  "estimated_total_training_days": 7.731469185293989,
+  "estimated_total_training_days_with_15pct_margin": 8.891189563088087,
+  "memory_evidence": {
+    "method": "All 12 cases completed full effective batches under a hard CUDA allocator cap of 0.85 on this 8 GB GPU.",
+    "peak_memory_bytes": null,
+    "note": "The reused probe did not log peak memory counters; no earlier-source peak is represented as current."
+  },
+  "initialization_note": "Parameter probes used controlled paired random mixer draws with native scaling. Formal training starts from native PyTorch initialization with seed 2026, not a probe checkpoint.",
+  "cpu_verification": {
+    "passed": 125,
+    "seconds": 25.4,
+    "source_fingerprint": "4392793f7ab928b8d1c04b0ae9deb085a6c846e66c8ad6c5ce9b012f7c30bf01"
+  },
+  "cuda_resume_verification": {
+    "cuda_three_networks_bit_exact_resume": true,
+    "injected_interruption_safe": true,
+    "corrupt_cuda_rng_rejected": true,
+    "effective_batch": 112,
+    "geometry": [
+      192,
+      14,
+      16,
+      4
+    ],
+    "completed_steps": 3,
+    "all_optimizer_states_step": 3,
+    "torch_version": "2.11.0+cu128",
+    "source_fingerprint": "4392793f7ab928b8d1c04b0ae9deb085a6c846e66c8ad6c5ce9b012f7c30bf01"
+  },
+  "parameter_comparisons": [
+    {
+      "cs": 2,
+      "layer_mixture": "uniform",
+      "steps": 120,
+      "effective_batch": 112,
+      "last_20_mean_loss": 6.894319140911103,
+      "last_20_mean_training_ber": 0.38697109520435335,
+      "pooled_in_range_validation_ber": 0.40545025855106054
+    },
+    {
+      "cs": 4,
+      "layer_mixture": "uniform",
+      "steps": 120,
+      "effective_batch": 112,
+      "last_20_mean_loss": 6.953058838844299,
+      "last_20_mean_training_ber": 0.39113072007894517,
+      "pooled_in_range_validation_ber": 0.40976927390609635
+    },
+    {
+      "cs": 8,
+      "layer_mixture": "uniform",
+      "steps": 120,
+      "effective_batch": 112,
+      "last_20_mean_loss": 6.990012991428375,
+      "last_20_mean_training_ber": 0.3937804318964481,
+      "pooled_in_range_validation_ber": 0.41746146974645315
+    },
+    {
+      "cs": 2,
+      "layer_mixture": "four_focus",
+      "steps": 120,
+      "effective_batch": 112,
+      "last_20_mean_loss": 7.516691040992737,
+      "last_20_mean_training_ber": 0.42199933528900146,
+      "pooled_in_range_validation_ber": 0.4305615913400759
+    }
+  ],
+  "parameter_comparison_scope": "120-step diagnostics, 128 coded slots per DMRS per layer count, no receiver decoding; neither a 70000-step result nor proof of a global optimum.",
+  "cases": [
+    {
+      "layers": 2,
+      "pilot_count": 1,
+      "interference_present": false,
+      "successful_full_batch_steps": 11,
+      "mean_step_seconds_excluding_global_warmup": 7.150219954542329,
+      "sampling_probability": 0.08333333333333333
+    },
+    {
+      "layers": 2,
+      "pilot_count": 1,
+      "interference_present": true,
+      "successful_full_batch_steps": 10,
+      "mean_step_seconds_excluding_global_warmup": 8.561454630002846,
+      "sampling_probability": 0.08333333333333333
+    },
+    {
+      "layers": 2,
+      "pilot_count": 2,
+      "interference_present": false,
+      "successful_full_batch_steps": 18,
+      "mean_step_seconds_excluding_global_warmup": 7.286929511766442,
+      "sampling_probability": 0.08333333333333333
+    },
+    {
+      "layers": 2,
+      "pilot_count": 2,
+      "interference_present": true,
+      "successful_full_batch_steps": 8,
+      "mean_step_seconds_excluding_global_warmup": 8.679760787497798,
+      "sampling_probability": 0.08333333333333333
+    },
+    {
+      "layers": 3,
+      "pilot_count": 1,
+      "interference_present": false,
+      "successful_full_batch_steps": 11,
+      "mean_step_seconds_excluding_global_warmup": 8.540433936363446,
+      "sampling_probability": 0.08333333333333333
+    },
+    {
+      "layers": 3,
+      "pilot_count": 1,
+      "interference_present": true,
+      "successful_full_batch_steps": 11,
+      "mean_step_seconds_excluding_global_warmup": 10.415049854544288,
+      "sampling_probability": 0.08333333333333333
+    },
+    {
+      "layers": 3,
+      "pilot_count": 2,
+      "interference_present": false,
+      "successful_full_batch_steps": 6,
+      "mean_step_seconds_excluding_global_warmup": 8.918815733331334,
+      "sampling_probability": 0.08333333333333333
+    },
+    {
+      "layers": 3,
+      "pilot_count": 2,
+      "interference_present": true,
+      "successful_full_batch_steps": 4,
+      "mean_step_seconds_excluding_global_warmup": 10.253768575013964,
+      "sampling_probability": 0.08333333333333333
+    },
+    {
+      "layers": 4,
+      "pilot_count": 1,
+      "interference_present": false,
+      "successful_full_batch_steps": 5,
+      "mean_step_seconds_excluding_global_warmup": 10.435359440004685,
+      "sampling_probability": 0.08333333333333333
+    },
+    {
+      "layers": 4,
+      "pilot_count": 1,
+      "interference_present": true,
+      "successful_full_batch_steps": 13,
+      "mean_step_seconds_excluding_global_warmup": 11.730782476920957,
+      "sampling_probability": 0.08333333333333333
+    },
+    {
+      "layers": 4,
+      "pilot_count": 2,
+      "interference_present": false,
+      "successful_full_batch_steps": 6,
+      "mean_step_seconds_excluding_global_warmup": 10.472611366664447,
+      "sampling_probability": 0.08333333333333333
+    },
+    {
+      "layers": 4,
+      "pilot_count": 2,
+      "interference_present": true,
+      "successful_full_batch_steps": 17,
+      "mean_step_seconds_excluding_global_warmup": 12.06891732353046,
+      "sampling_probability": 0.08333333333333333
+    }
+  ],
+  "config": {
+    "subcarrier_spacing_khz": 30,
+    "n_subcarriers": 192,
+    "n_fft": 256,
+    "cyclic_prefix": 18,
+    "n_ofdm_symbols": 14,
+    "n_rx_antennas": 16,
+    "layer_counts": [
+      2,
+      3,
+      4
+    ],
+    "n_tx_antennas": 4,
+    "ue_tx_antennas": 1,
+    "carrier_frequency_hz": 3500000000.0,
+    "maximum_channel_delay_s": 1.4e-05,
+    "training_channel": "UMa",
+    "validation_channels": [
+      "UMa",
+      "CDL-C",
+      "CDL-D",
+      "UMi"
+    ],
+    "modulation": "64QAM",
+    "snr_db_range": [
+      0.0,
+      45.0
+    ],
+    "speed_mps_range": [
+      0.0,
+      35.0
+    ],
+    "delay_spread_ns_range": [
+      10.0,
+      1100.0
+    ],
+    "cdl_delay_spread_ns": 300.0,
+    "interference_probability": 0.5,
+    "model": {
+      "denoise_widths": [
+        64,
+        64,
+        64,
+        2
+      ],
+      "denoise_subsamples": [
+        1,
+        4,
+        2,
+        1
+      ],
+      "time_mixer_channels": 2,
+      "detector_channels": 64,
+      "detector_sections": 4,
+      "detector_subsample": 8,
+      "demapper_widths": [
+        32,
+        32,
+        32,
+        8
+      ],
+      "max_bits": 8,
+      "residual_projection_bias": false
+    },
+    "training": {
+      "batch_size": 112,
+      "learning_rate": 0.0044,
+      "total_steps": 70000,
+      "warmup_steps": 0,
+      "weight_decay": 0.0,
+      "lamb_beta1": 0.9,
+      "lamb_beta2": 0.999,
+      "lamb_eps": 1e-06,
+      "symbol_loss_weight": 1e-05,
+      "layer_counts": [
+        2,
+        3,
+        4
+      ],
+      "layer_sampling_probabilities": [
+        0.3333333333333333,
+        0.3333333333333333,
+        0.3333333333333333
+      ],
+      "pilot_sampling_probability_two": 0.5,
+      "interference_probability": 0.5,
+      "inr_mean_db": 10.0,
+      "inr_std_db": 5.0,
+      "vcl_alpha": 1e-05,
+      "seed": 2026,
+      "backend": "sionna_tr38901",
+      "amp_dtype": "bfloat16",
+      "lamb_bias_correction": true,
+      "vcl_attachment": "all",
+      "symbol_loss_reduction": "sum"
+    },
+    "receiver": {
+      "rzf_alpha": 0.0001,
+      "incm_coherence_bandwidth": 24,
+      "shrinkage": "oas",
+      "baseline_smoothing_window": 5,
+      "pilot_spacing": 4,
+      "dmrs_symbols": [
+        2,
+        11
+      ]
+    },
+    "evaluation": {
+      "channel_model": "CDL-C",
+      "speed_mps_range": [
+        10.0,
+        15.0
+      ],
+      "sinr_db_points": [
+        -5.0,
+        -3.0,
+        -1.0,
+        1.0,
+        3.0,
+        5.0,
+        7.0,
+        9.0,
+        11.0,
+        13.0
+      ],
+      "sinr_bin_width_db": 2.0,
+      "validation_samples": 32000,
+      "interfering_ues": 1,
+      "pilot_counts": [
+        1,
+        2
+      ],
+      "mcs_indices": [
+        11,
+        12
+      ]
+    },
+    "channel": {
+      "uma_delay_spread_mode": "native",
+      "cdl_delay_spread_mode": "uniform_10_1100ns",
+      "cir_discretization": "sinc",
+      "cir_normalization": true,
+      "enable_pathloss": false,
+      "enable_shadow_fading": false,
+      "interferer_timing": "random_symbol"
+    }
+  }
+}

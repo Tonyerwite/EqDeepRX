@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+runtime/
+*.log
+Thumbs.db
+
+# Local task instructions and the separately published reference article.
+readme.txt
+EqDeepRx_Learning_a_Scalable_and_Interference.pdf

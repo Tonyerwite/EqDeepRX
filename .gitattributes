@@ -1,0 +1,6 @@
+# The released checkpoint manifest hashes the original Python file bytes.
+*.py -text
+*.json -text whitespace=cr-at-eol
+*.jsonl -text whitespace=cr-at-eol
+*.pt binary
+*.png binary
